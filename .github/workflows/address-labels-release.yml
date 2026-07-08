@@ -1,0 +1,90 @@
+name: Address labels release
+
+on:
+  workflow_dispatch:
+    inputs:
+      query_id:
+        description: Dune query id to import.
+        default: "7868214"
+        required: true
+      project:
+        description: Project name stored in address labels.
+        default: Uniswap V3
+        required: true
+      label:
+        description: Display label stored in address labels.
+        default: Uniswap V3
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
+      RELEASE_TAG: address-labels-latest
+      RELEASE_DIR: dist/address-labels
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Import labels from Dune
+        run: |
+          npm run import:address-labels -- \
+            --query-id="${{ inputs.query_id }}" \
+            --project="${{ inputs.project }}" \
+            --label="${{ inputs.label }}"
+
+      - name: Package release assets
+        run: |
+          npm run prepare:address-labels-release -- \
+            --version="$(date -u +%Y%m%dT%H%M%SZ)" \
+            --source="dune:query:${{ inputs.query_id }}"
+
+      - name: Write release notes
+        run: |
+          ROW_COUNT="$(node -e "const fs=require('fs'); const m=JSON.parse(fs.readFileSync('${RELEASE_DIR}/address-labels.manifest.json','utf8')); console.log(m.rowCount)")"
+          VERSION="$(node -e "const fs=require('fs'); const m=JSON.parse(fs.readFileSync('${RELEASE_DIR}/address-labels.manifest.json','utf8')); console.log(m.version)")"
+          cat > "${RELEASE_DIR}/notes.md" <<EOF
+          Current address labels snapshot for Transaction Vis.
+
+          - Version: ${VERSION}
+          - Source: dune:query:${{ inputs.query_id }}
+          - Rows: ${ROW_COUNT}
+
+          Download URL:
+          https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/address-labels.sqlite.gz
+          EOF
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${{ github.repository }}" \
+              --title "Address labels latest" \
+              --notes-file "${RELEASE_DIR}/notes.md" \
+              --latest
+          else
+            gh release create "${RELEASE_TAG}" \
+              --repo "${{ github.repository }}" \
+              --target "${GITHUB_SHA}" \
+              --title "Address labels latest" \
+              --notes-file "${RELEASE_DIR}/notes.md" \
+              --latest
+          fi
+
+          gh release upload "${RELEASE_TAG}" \
+            "${RELEASE_DIR}/address-labels.sqlite.gz" \
+            "${RELEASE_DIR}/address-labels.manifest.json" \
+            --repo "${{ github.repository }}" \
+            --clobber

@@ -42,13 +42,31 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ## Address Labels
 
-Address labels are optional. To import labels into a local SQLite database, set `DUNE_API_KEY` and run:
+Address labels are optional. The app looks for a local SQLite database at `data/address-labels.sqlite` by default. To download the latest published snapshot:
+
+```bash
+npm run download:address-labels
+```
+
+To update an existing database by merging new published rows while keeping local additions:
+
+```bash
+npm run update:address-labels
+```
+
+The default public data channel is:
+
+```text
+https://github.com/PanchoPorg/transaction-vis/releases/download/address-labels-latest/address-labels.sqlite.gz
+```
+
+Maintainers can rebuild the database from Dune. Set `DUNE_API_KEY` and run:
 
 ```bash
 npm run import:address-labels
 ```
 
-The generated database defaults to `data/address-labels.sqlite` and is intentionally ignored by Git. Use `ADDRESS_LABELS_DB_PATH` to point the app at another database path.
+The generated database is intentionally ignored by Git. Use `ADDRESS_LABELS_DB_PATH` to point the app at another database path.
 
 ## Scripts
 
@@ -57,6 +75,8 @@ npm run dev
 npm run test
 npm run lint
 npm run build
+npm run download:address-labels
+npm run update:address-labels
 ```
 
 ## License

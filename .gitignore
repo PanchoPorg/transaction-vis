@@ -19,6 +19,7 @@
 
 # production
 /build
+/dist
 
 # local generated data
 /data/*.sqlite
