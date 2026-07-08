@@ -2,19 +2,11 @@
 
 GitHub Releases are only the public distribution channel for ready-made address label database snapshots. Dataset construction happens locally.
 
-## Local Import
+## Local Dataset
 
-Set local Dune credentials in `.env.local` or the shell, then merge new rows into the existing SQLite database:
+Build or update the address label dataset outside this public repository with the private local mini-service. The finished SQLite database should be available at `data/address-labels.sqlite` by default, or passed with `--db=/path/to/address-labels.sqlite` when packaging.
 
-```bash
-npm run maintain:address-labels:import -- --query-id=7868214 --project="Uniswap V3" --label="Uniswap V3"
-```
-
-The import is an upsert into `data/address-labels.sqlite` by default. It creates the schema if needed, keeps unrelated local rows, and updates rows that match the table primary key.
-
-Use `--db=/path/to/address-labels.sqlite` to update another database.
-
-If Dune rate-limits a run, rerun the same command later. Already imported rows are updated in place rather than duplicated.
+This repository only packages and publishes ready-made SQLite snapshots. It does not contain dataset-source integrations or dataset construction jobs.
 
 ## Package
 

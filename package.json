@@ -11,7 +11,6 @@
     "test": "vitest run",
     "download:address-labels": "tsx scripts/sync-address-labels.ts --mode=replace",
     "update:address-labels": "tsx scripts/sync-address-labels.ts --mode=merge",
-    "maintain:address-labels:import": "tsx scripts/import-address-labels.ts",
     "maintain:address-labels:package": "tsx scripts/prepare-address-labels-release.ts",
     "maintain:address-labels:publish": "tsx scripts/publish-address-labels-release.ts"
   },
