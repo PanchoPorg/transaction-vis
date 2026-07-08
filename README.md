@@ -10,7 +10,7 @@ Transaction Vis turns a transaction hash into a directed graph of address nodes 
 - Aggregated transfer edges between the same addresses
 - Failed-transaction handling
 - Clickable graph nodes and edges with transfer details
-- Optional local SQLite address labels imported from Dune
+- Optional local SQLite address labels from published snapshots
 
 ## Getting Started
 
@@ -35,6 +35,7 @@ ETHERSCAN_API_KEY=your_etherscan_api_key
 Run the development server:
 
 ```bash
+npm run download:address-labels
 npm run dev
 ```
 
@@ -58,12 +59,6 @@ The default public data channel is:
 
 ```text
 https://github.com/PanchoPorg/transaction-vis/releases/download/address-labels-latest/address-labels.sqlite.gz
-```
-
-Maintainers can rebuild the database from Dune. Set `DUNE_API_KEY` and run:
-
-```bash
-npm run import:address-labels
 ```
 
 The generated database is intentionally ignored by Git. Use `ADDRESS_LABELS_DB_PATH` to point the app at another database path.

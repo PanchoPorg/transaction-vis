@@ -9,10 +9,11 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "import:address-labels": "tsx scripts/import-address-labels.ts",
-    "prepare:address-labels-release": "tsx scripts/prepare-address-labels-release.ts",
     "download:address-labels": "tsx scripts/sync-address-labels.ts --mode=replace",
-    "update:address-labels": "tsx scripts/sync-address-labels.ts --mode=merge"
+    "update:address-labels": "tsx scripts/sync-address-labels.ts --mode=merge",
+    "maintain:address-labels:import": "tsx scripts/import-address-labels.ts",
+    "maintain:address-labels:package": "tsx scripts/prepare-address-labels-release.ts",
+    "maintain:address-labels:publish": "tsx scripts/publish-address-labels-release.ts"
   },
   "dependencies": {
     "@xyflow/react": "^12.11.1",
