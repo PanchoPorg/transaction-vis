@@ -9,13 +9,11 @@ import { DEFAULT_ADDRESS_LABELS_DB_PATH } from "../src/lib/address-labels";
 const DEFAULT_OUT_DIR = path.join(process.cwd(), "dist", "address-labels");
 const DEFAULT_ASSET_NAME = "address-labels.sqlite.gz";
 const DEFAULT_MANIFEST_NAME = "address-labels.manifest.json";
-const DEFAULT_SOURCE = "dune:query:7868214";
 
 type Options = {
   dbPath: string;
   outDir: string;
   version: string;
-  source: string;
   assetName: string;
   manifestName: string;
 };
@@ -24,7 +22,6 @@ type ReleaseManifest = {
   version: string;
   schemaVersion: number;
   createdAt: string;
-  source: string;
   rowCount: number;
   database: {
     file: string;
@@ -51,7 +48,6 @@ function readOptions(): Options {
     dbPath: readOption("db") ?? process.env.ADDRESS_LABELS_DB_PATH ?? DEFAULT_ADDRESS_LABELS_DB_PATH,
     outDir: readOption("out-dir") ?? DEFAULT_OUT_DIR,
     version: readOption("version") ?? defaultVersion(),
-    source: readOption("source") ?? DEFAULT_SOURCE,
     assetName: readOption("asset-name") ?? DEFAULT_ASSET_NAME,
     manifestName: readOption("manifest-name") ?? DEFAULT_MANIFEST_NAME,
   };
@@ -99,7 +95,6 @@ async function main() {
     version: options.version,
     schemaVersion: 1,
     createdAt: new Date().toISOString(),
-    source: options.source,
     rowCount,
     database: {
       file: options.assetName,

@@ -32,7 +32,6 @@ type ReleaseManifest = {
   version: string;
   schemaVersion: number;
   createdAt: string;
-  source: string;
   rowCount: number;
   database: {
     file: string;
@@ -262,7 +261,6 @@ async function main() {
         {
           dbPath: options.dbPath,
           version: manifest.version,
-          source: manifest.source,
           releaseBaseUrl: options.releaseBaseUrl,
           ...result,
         },

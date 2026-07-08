@@ -46,8 +46,7 @@ jobs:
       - name: Package release assets
         run: |
           npm run prepare:address-labels-release -- \
-            --version="$(date -u +%Y%m%dT%H%M%SZ)" \
-            --source="dune:query:${{ inputs.query_id }}"
+            --version="$(date -u +%Y%m%dT%H%M%SZ)"
 
       - name: Write release notes
         run: |
@@ -57,7 +56,6 @@ jobs:
           Current address labels snapshot for Transaction Vis.
 
           - Version: ${VERSION}
-          - Source: dune:query:${{ inputs.query_id }}
           - Rows: ${ROW_COUNT}
 
           Download URL:
