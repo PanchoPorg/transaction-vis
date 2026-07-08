@@ -1,36 +1,64 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Transaction Vis
+
+Interactive Ethereum transaction transfer visualizer for tracing ETH, ERC-20, and internal value flows between addresses.
+
+Transaction Vis turns a transaction hash into a directed graph of address nodes and transfer edges. It fetches transaction, receipt, token metadata, and internal transfer data through Etherscan, normalizes the transfer records, and renders an inspectable graph in a Next.js app.
+
+## Features
+
+- ETH, ERC-20, and internal transfer visualization
+- Aggregated transfer edges between the same addresses
+- Failed-transaction handling
+- Clickable graph nodes and edges with transfer details
+- Optional local SQLite address labels imported from Dune
 
 ## Getting Started
 
-First, run the development server:
+Install dependencies:
+
+```bash
+npm install
+```
+
+Create a local environment file:
+
+```bash
+cp .env.example .env.local
+```
+
+Set the required API key:
+
+```bash
+ETHERSCAN_API_KEY=your_etherscan_api_key
+```
+
+Run the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Address Labels
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Address labels are optional. To import labels into a local SQLite database, set `DUNE_API_KEY` and run:
 
-## Learn More
+```bash
+npm run import:address-labels
+```
 
-To learn more about Next.js, take a look at the following resources:
+The generated database defaults to `data/address-labels.sqlite` and is intentionally ignored by Git. Use `ADDRESS_LABELS_DB_PATH` to point the app at another database path.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Scripts
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+npm run dev
+npm run test
+npm run lint
+npm run build
+```
 
-## Deploy on Vercel
+## License
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+MIT
