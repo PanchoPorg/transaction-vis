@@ -7,18 +7,11 @@ function params(overrides: Partial<TransferPathParams> = {}): TransferPathParams
     sourceY: 120,
     targetX: 700,
     targetY: 280,
-    laneIndex: 0,
-    laneCount: 1,
-    fanoutIndex: 0,
-    fanoutCount: 1,
-    fanoutHub: null,
-    fanoutOffset: 0,
-    straightSource: false,
-    straightTarget: false,
-    sourceRouteOffset: null,
-    targetRouteOffset: null,
-    sourceId: "source",
-    targetId: "target",
+    routeY: 200,
+    label: "[1] 2.06 WETH",
+    labelBias: 0.5,
+    sourceCurveMode: "default",
+    targetCurveMode: "default",
     ...overrides,
   };
 }
@@ -29,29 +22,34 @@ function commandCount(path: string, command: "C" | "L") {
 
 describe("transferPath", () => {
   it("uses one horizontal segment and at most two curves for offset endpoints", () => {
-    const { path } = transferPath(
-      params({
-        sourceRouteOffset: 72,
-        targetRouteOffset: -128,
-      }),
-    );
+    const { path, horizontalMinX, horizontalMaxX } = transferPath(params());
 
     expect(commandCount(path, "L")).toBe(1);
-    expect(commandCount(path, "C")).toBeLessThanOrEqual(2);
+    expect(commandCount(path, "C")).toBe(2);
+    expect(horizontalMinX).toBe(220);
+    expect(horizontalMaxX).toBe(556);
   });
 
   it("keeps source-straight routes to one horizontal plus one target curve", () => {
-    const { path } = transferPath(params({ straightSource: true }));
+    const { path, horizontalStartX, horizontalEndX } = transferPath(
+      params({ routeY: 120 }),
+    );
 
     expect(commandCount(path, "L")).toBe(1);
     expect(commandCount(path, "C")).toBe(1);
+    expect(horizontalStartX).toBe(100);
+    expect(horizontalEndX).toBe(556);
   });
 
   it("keeps target-straight routes to one source curve plus one horizontal", () => {
-    const { path } = transferPath(params({ straightTarget: true }));
+    const { path, horizontalStartX, horizontalEndX } = transferPath(
+      params({ routeY: 280 }),
+    );
 
     expect(commandCount(path, "L")).toBe(1);
     expect(commandCount(path, "C")).toBe(1);
+    expect(horizontalStartX).toBe(220);
+    expect(horizontalEndX).toBe(700);
   });
 
   it("keeps centered same-level routes fully horizontal", () => {
@@ -59,8 +57,7 @@ describe("transferPath", () => {
       params({
         sourceY: 160,
         targetY: 160,
-        straightSource: true,
-        straightTarget: true,
+        routeY: 160,
       }),
     );
 
@@ -68,10 +65,17 @@ describe("transferPath", () => {
     expect(commandCount(path, "C")).toBe(0);
   });
 
-  it("keeps labels aligned for routes to the same address column", () => {
-    const straightTarget = transferPath(params({ straightTarget: true }));
-    const curvedTarget = transferPath(params({ targetRouteOffset: -56 }));
+  it("centers labels on the actual horizontal segment", () => {
+    const straightTarget = transferPath(params({ routeY: 280 }));
+    const curvedTarget = transferPath(params({ routeY: 224 }));
 
-    expect(curvedTarget.labelX).toBe(straightTarget.labelX);
+    expect(straightTarget.labelX).toBe(
+      (straightTarget.horizontalStartX + straightTarget.horizontalEndX) / 2,
+    );
+    expect(curvedTarget.labelX).toBe(
+      (curvedTarget.horizontalStartX + curvedTarget.horizontalEndX) / 2,
+    );
+    expect(curvedTarget.labelWidth).toBeGreaterThan(0);
+    expect(curvedTarget.labelHeight).toBe(16);
   });
 });

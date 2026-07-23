@@ -21,23 +21,16 @@ export function TransferEdge(props: EdgeProps<TransferFlowEdge>) {
     markerEnd,
     selected,
   } = props;
-  const { path, labelX, labelY } = transferPath({
+  const { path, labelX, labelY, labelWidth, labelHeight } = transferPath({
     sourceX,
     sourceY,
     targetX,
     targetY,
-    laneIndex: data?.laneIndex ?? 0,
-    laneCount: data?.laneCount ?? 1,
-    fanoutIndex: data?.fanoutIndex ?? 0,
-    fanoutCount: data?.fanoutCount ?? 1,
-    fanoutHub: data?.fanoutHub ?? null,
-    fanoutOffset: data?.fanoutOffset ?? Number.NaN,
-    straightSource: data?.straightSource ?? false,
-    straightTarget: data?.straightTarget ?? false,
-    sourceRouteOffset: data?.sourceRouteOffset ?? null,
-    targetRouteOffset: data?.targetRouteOffset ?? null,
-    sourceId: data?.source ?? "",
-    targetId: data?.target ?? "",
+    routeY: data?.routeY ?? (sourceY + targetY) / 2,
+    label: data?.label ?? "",
+    labelBias: data?.labelBias ?? 0.5,
+    sourceCurveMode: data?.sourceCurveMode ?? "default",
+    targetCurveMode: data?.targetCurveMode ?? "default",
   });
   const color = edgeColor(data);
   const dashed = data?.kinds.includes("topLevelCall");
@@ -51,27 +44,29 @@ export function TransferEdge(props: EdgeProps<TransferFlowEdge>) {
         interactionWidth={30}
         style={{
           stroke: color,
-          strokeWidth: selected ? 5.2 : 3.4,
+          strokeWidth: selected ? 4.6 : 3,
           strokeDasharray: dashed ? "8 8" : undefined,
           strokeLinecap: "round",
           strokeLinejoin: "round",
-          filter: selected ? `drop-shadow(0 0 8px ${color})` : undefined,
+          filter: selected ? `drop-shadow(0 0 5px ${color})` : undefined,
         }}
       />
       <EdgeLabelRenderer>
         <button
           className={clsx(
-            "nodrag nopan absolute w-[18ch] whitespace-nowrap bg-transparent px-1 py-0.5 text-left font-mono text-[12px] font-semibold leading-none shadow-none",
+            "nodrag nopan absolute whitespace-nowrap bg-transparent px-1 py-0.5 text-left font-mono text-[12px] font-semibold leading-none shadow-none",
             selected
-              ? "text-[#f8d09a]"
+              ? "text-tx-accent-pale"
               : data?.kinds.includes("erc20")
-                ? "text-[#d9dde4]"
+                ? "text-tx-erc20-label"
                 : data?.kinds.includes("topLevelCall") || data?.kinds.includes("native")
-                  ? "text-[#81a0ff]"
-                  : "text-[#d9dde4]",
+                  ? "text-tx-native-label"
+                  : "text-tx-secondary",
           )}
           style={{
             transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+            width: labelWidth,
+            height: labelHeight,
             pointerEvents: "all",
             textShadow: "0 1px 3px rgba(0,0,0,0.95), 0 0 8px rgba(0,0,0,0.7)",
           }}
