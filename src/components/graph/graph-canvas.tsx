@@ -8,6 +8,7 @@ import {
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
+  getViewportForBounds,
   useEdgesState,
   useNodesState,
   useReactFlow,
@@ -24,6 +25,7 @@ import {
   transferArrowMarkerId,
 } from "./edge-style";
 import { TransferEdge } from "./transfer-edge";
+import { NODE_HEIGHT, NODE_WIDTH } from "./geometry";
 import { layoutTrace } from "./layout";
 import type { AddressFlowNode, GraphSelection, TransferFlowEdge } from "./types";
 
@@ -78,53 +80,64 @@ function TransferArrowMarkers({ edges }: { edges: TransferFlowEdge[] }) {
 
 function FocusViewOnTrace({
   traceId,
+  layoutedTraceId,
   nodes,
   edges,
   canvasRef,
 }: {
   traceId: string;
+  layoutedTraceId: string | null;
   nodes: AddressFlowNode[];
   edges: TransferFlowEdge[];
   canvasRef: RefObject<HTMLDivElement | null>;
 }) {
-  const { fitView, setViewport } = useReactFlow();
+  const { setViewport } = useReactFlow();
   const focusedTraceRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (focusedTraceRef.current === traceId || nodes.length === 0) return;
+    if (
+      layoutedTraceId !== traceId ||
+      focusedTraceRef.current === traceId ||
+      nodes.length === 0
+    ) {
+      return;
+    }
 
     const frame = requestAnimationFrame(() => {
       focusedTraceRef.current = traceId;
       const canvas = canvasRef.current;
-      const hubNode = nodes.reduce<AddressFlowNode | null>(
-        (best, node) =>
-          !best || node.data.transferCount > best.data.transferCount ? node : best,
-        null,
+      if (!canvas) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const minX = Math.min(...nodes.map((node) => node.position.x));
+      const maxX = Math.max(
+        ...nodes.map((node) => node.position.x + (node.width ?? NODE_WIDTH)),
+      );
+      const minNodeY = Math.min(...nodes.map((node) => node.position.y));
+      const maxNodeY = Math.max(
+        ...nodes.map((node) => node.position.y + (node.height ?? NODE_HEIGHT)),
+      );
+      const routeYs = edges.flatMap((edge) => edge.data?.routeY ?? []);
+      const minY = Math.min(minNodeY, ...(routeYs.map((routeY) => routeY - 40)));
+      const maxY = Math.max(maxNodeY, ...(routeYs.map((routeY) => routeY + 40)));
+      const viewport = getViewportForBounds(
+        {
+          x: minX,
+          y: minY,
+          width: Math.max(maxX - minX, NODE_WIDTH),
+          height: Math.max(maxY - minY, NODE_HEIGHT),
+        },
+        rect.width,
+        rect.height,
+        0.2,
+        1.05,
+        0.12,
       );
 
-      if (canvas && hubNode && edges.length >= 5) {
-        const rect = canvas.getBoundingClientRect();
-        const nodeWidth = hubNode.width ?? 268;
-        const nodeHeight = hubNode.height ?? 76;
-        const hubCenterX = hubNode.position.x + nodeWidth / 2;
-        const hubCenterY = hubNode.position.y + nodeHeight / 2;
-        const zoom = Math.min(0.74, Math.max(0.62, rect.width / 1320));
-
-        void setViewport(
-          {
-            x: rect.width * 0.36 - hubCenterX * zoom,
-            y: rect.height * 0.49 - hubCenterY * zoom,
-            zoom,
-          },
-          { duration: 360 },
-        );
-        return;
-      }
-
-      void fitView({ padding: 0.12, duration: 360, maxZoom: 1.05 });
+      void setViewport(viewport, { duration: 360 });
     });
     return () => cancelAnimationFrame(frame);
-  }, [canvasRef, edges, fitView, nodes, setViewport, traceId]);
+  }, [canvasRef, edges, layoutedTraceId, nodes, setViewport, traceId]);
 
   return null;
 }
@@ -134,6 +147,7 @@ function GraphCanvasInner({ trace, onSelectionChange }: GraphCanvasProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState<AddressFlowNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<TransferFlowEdge>([]);
   const [layouting, setLayouting] = useState(true);
+  const [layoutedTraceId, setLayoutedTraceId] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -143,6 +157,7 @@ function GraphCanvasInner({ trace, onSelectionChange }: GraphCanvasProps) {
       if (alive) {
         setNodes(layouted.nodes);
         setEdges(layouted.edges);
+        setLayoutedTraceId(trace.tx.hash);
       }
       if (alive) setLayouting(false);
     })();
@@ -169,7 +184,7 @@ function GraphCanvasInner({ trace, onSelectionChange }: GraphCanvasProps) {
   );
 
   return (
-    <div ref={canvasRef} className="relative h-full min-h-[520px] overflow-hidden bg-[#15171b]">
+    <div ref={canvasRef} className="relative h-full min-h-[520px] overflow-hidden bg-tx-canvas">
       <TransferArrowMarkers edges={edges} />
       <ReactFlow
         nodes={nodes}
@@ -189,31 +204,32 @@ function GraphCanvasInner({ trace, onSelectionChange }: GraphCanvasProps) {
       >
         <Background
           variant={BackgroundVariant.Dots}
-          color="#2b3038"
+          color="var(--tx-border)"
           gap={22}
           size={1.5}
-          bgColor="#15171b"
+          bgColor="var(--tx-canvas)"
         />
         <MiniMap
           pannable
           zoomable
-          nodeColor="#3c4350"
-          maskColor="rgba(12, 14, 18, 0.64)"
-          className="!bottom-5 !left-5 !right-auto !rounded-lg !border !border-white/10 !bg-[#202329]/95"
+          nodeColor="var(--tx-border-strong)"
+          maskColor="rgba(9, 10, 12, 0.68)"
+          className="!bottom-5 !left-5 !right-auto !rounded-lg !border !border-tx-border !bg-tx-raised/95"
         />
         <Controls
           position="bottom-right"
-          className="!bottom-5 !right-5 !overflow-hidden !rounded-lg !border !border-white/10 !bg-[#202329]/95 !shadow-xl"
+          className="!bottom-5 !right-5 !overflow-hidden !rounded-lg !border !border-tx-border !bg-tx-raised/95 !shadow-[0_14px_36px_rgba(3,2,8,0.28)]"
         />
         <FocusViewOnTrace
           traceId={trace.tx.hash}
+          layoutedTraceId={layoutedTraceId}
           nodes={nodes}
           edges={edges}
           canvasRef={canvasRef}
         />
       </ReactFlow>
       {layouting ? (
-        <div className="pointer-events-none absolute left-1/2 top-5 -translate-x-1/2 rounded-full border border-white/10 bg-[#202329]/90 px-3 py-1.5 text-[11px] font-medium text-[#b9c0ca] shadow-lg">
+        <div className="pointer-events-none absolute left-1/2 top-5 -translate-x-1/2 rounded-full border border-tx-border bg-tx-raised/90 px-3 py-1.5 text-[11px] font-medium text-tx-secondary shadow-lg">
           Laying out graph
         </div>
       ) : null}
