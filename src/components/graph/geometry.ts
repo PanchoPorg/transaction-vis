@@ -9,7 +9,7 @@ export const EDGE_LABEL_HEIGHT = 16;
 export const EDGE_LABEL_HORIZONTAL_PADDING = 8;
 export const EDGE_LABEL_MONO_CHARACTER_WIDTH = 7.25;
 
-export type EdgeCurveMode = "default" | "compact";
+export type EdgeCurveMode = "default" | "compact" | "expanded";
 export type GraphPortType = "source" | "target";
 export type GraphPortSide = "left" | "right";
 
@@ -125,22 +125,65 @@ export function edgeRouteGeometry({
   const defaultSourceStub = Math.min(150, Math.max(72, dx * 0.2));
   const defaultTargetStub = Math.min(170, Math.max(82, dx * 0.24));
   const defaultCurve = Math.min(112, Math.max(46, dx * 0.17));
-  const sourceStub =
-    sourceCurveMode === "compact"
-      ? Math.min(defaultSourceStub, 88)
-      : defaultSourceStub;
-  const targetStub =
-    targetCurveMode === "compact"
-      ? Math.min(defaultTargetStub, 88)
-      : defaultTargetStub;
-  const sourceCurve =
-    sourceCurveMode === "compact" ? Math.min(defaultCurve, 46) : defaultCurve;
-  const targetCurve =
-    targetCurveMode === "compact" ? Math.min(defaultCurve, 46) : defaultCurve;
-  const routeStartX = sourceX + direction * sourceStub;
-  const routeEndX = targetX - direction * targetStub;
   const sourceNeedsCurve = Math.abs(sourceY - routeY) >= 1;
   const targetNeedsCurve = Math.abs(targetY - routeY) >= 1;
+  const expandedStub = (fallback: number, verticalDelta: number) =>
+    Math.min(
+      260,
+      Math.max(fallback, 144, dx * 0.42, Math.abs(verticalDelta) * 0.55),
+    );
+  let sourceStub =
+    sourceCurveMode === "compact"
+      ? Math.min(defaultSourceStub, 88)
+      : sourceCurveMode === "expanded"
+        ? expandedStub(defaultSourceStub, sourceY - routeY)
+        : defaultSourceStub;
+  let targetStub =
+    targetCurveMode === "compact"
+      ? Math.min(defaultTargetStub, 88)
+      : targetCurveMode === "expanded"
+        ? expandedStub(defaultTargetStub, targetY - routeY)
+        : defaultTargetStub;
+  const activeStubTotal =
+    (sourceNeedsCurve ? sourceStub : 0) +
+    (targetNeedsCurve ? targetStub : 0);
+  const stubBudget = Math.max(0, dx - MIN_HORIZONTAL_ROUTE_RUN);
+  if (
+    (sourceCurveMode === "expanded" ||
+      targetCurveMode === "expanded") &&
+    activeStubTotal > stubBudget &&
+    activeStubTotal > 0
+  ) {
+    const scale = stubBudget / activeStubTotal;
+    if (sourceNeedsCurve) sourceStub *= scale;
+    if (targetNeedsCurve) targetStub *= scale;
+  }
+  const sourceCurve =
+    sourceCurveMode === "compact"
+      ? Math.min(defaultCurve, 46)
+      : sourceCurveMode === "expanded"
+        ? Math.max(
+            0,
+            Math.min(
+              Math.max(defaultCurve, sourceStub * 0.55),
+              sourceStub - 18,
+            ),
+          )
+        : defaultCurve;
+  const targetCurve =
+    targetCurveMode === "compact"
+      ? Math.min(defaultCurve, 46)
+      : targetCurveMode === "expanded"
+        ? Math.max(
+            0,
+            Math.min(
+              Math.max(defaultCurve, targetStub * 0.55),
+              targetStub - 18,
+            ),
+          )
+        : defaultCurve;
+  const routeStartX = sourceX + direction * sourceStub;
+  const routeEndX = targetX - direction * targetStub;
   const horizontalStartX = sourceNeedsCurve ? routeStartX : sourceX;
   const horizontalEndX = targetNeedsCurve ? routeEndX : targetX;
   const sourcePoint = { x: sourceX, y: sourceY };

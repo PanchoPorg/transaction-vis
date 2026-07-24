@@ -130,6 +130,33 @@ describe("graph route geometry", () => {
     expect(compact.segments.every((segment) => segment.to.y === 100 || segment.to.y === 180)).toBe(true);
   });
 
+  it("uses expanded endpoint geometry to shorten the horizontal lane", () => {
+    const normal = edgeRouteGeometry({
+      sourceX: 0,
+      sourceY: 0,
+      targetX: 708,
+      targetY: 300,
+      routeY: 100,
+    });
+    const expanded = edgeRouteGeometry({
+      sourceX: 0,
+      sourceY: 0,
+      targetX: 708,
+      targetY: 300,
+      routeY: 100,
+      sourceCurveMode: "expanded",
+    });
+
+    expect(expanded.horizontalStartX).toBeGreaterThan(
+      normal.horizontalStartX,
+    );
+    expect(
+      expanded.horizontalMaxX - expanded.horizontalMinX,
+    ).toBeLessThan(
+      normal.horizontalMaxX - normal.horizontalMinX,
+    );
+  });
+
   it("detects cubic crossings and permits only a shared physical port", () => {
     const upper = edgeRouteGeometry({
       sourceX: 0,
