@@ -17,6 +17,7 @@ export type TransferEdgeData = TransferEdgeRecord &
     targetCurveMode: EdgeCurveMode;
     sourcePortRatio: number;
     targetPortRatio: number;
+    mixedDirectionGroups?: string[];
   };
 
 export type AddressFlowNode = Node<AddressNodeData, "address">;
