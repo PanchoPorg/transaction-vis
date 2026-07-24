@@ -7,6 +7,7 @@ import {
 } from "./edge-style";
 import {
   adaptiveColumnClearGap,
+  alignColumnPairLabels,
   alignDisconnectedComponents,
   alignDynamicReciprocalLeafColumns,
   assignMixedDirectionFanoutPorts,
@@ -19,9 +20,11 @@ import {
   edgeHasValidHorizontalCorridor,
   edgeHorizontalRoute,
   edgeNodeCollisions,
+  equalizeComponentColumnSpacing,
   horizontalRoutesConflict,
   layoutTrace,
   orderColumnPositionsByTransferIndex,
+  routingIsCollisionFree,
   toFlowElements,
 } from "./layout";
 import {
@@ -40,6 +43,10 @@ import {
 } from "./geometry";
 import type { AddressFlowNode, TransferFlowEdge } from "./types";
 import type { AddressNodeRecord, TransferEdgeRecord, TransferRecord, TxTraceResponse } from "@/lib/tx/types";
+import {
+  REPORTED_DCC9_ADDRESSES,
+  reportedDcc9Trace,
+} from "./fixtures/reported-dcc9-trace";
 
 const SENDER = "0x1111111111111111111111111111111111111111";
 const RECEIVER = "0x2222222222222222222222222222222222222222";
@@ -2096,6 +2103,195 @@ describe("graph layout", () => {
     expect(adaptiveColumnClearGap(12)).toBeCloseTo(46.8);
   });
 
+  it("chooses a deterministic straight anchor for a disconnected pair", () => {
+    const makeTopology = (reverse = false) => {
+      const primary = "anchor-primary";
+      const sourceTop = "anchor-source-top";
+      const sourceBottom = "anchor-source-bottom";
+      const pairTop = "anchor-a";
+      const pairBottom = "anchor-b";
+      const positions = new Map([
+        [primary, { x: 2500, y: 1000 }],
+        [sourceTop, { x: 0, y: 0 }],
+        [sourceBottom, { x: 708, y: 300 }],
+        [pairTop, { x: 1416, y: 0 }],
+        [pairBottom, { x: 1416, y: 300 }],
+      ]);
+      const edges = [
+        flowEdge(
+          "anchor-bridge",
+          sourceTop,
+          sourceBottom,
+          "out-right",
+          "in-left",
+          [0],
+        ),
+        flowEdge(
+          "anchor-top-edge",
+          sourceTop,
+          pairTop,
+          "out-right",
+          "in-left",
+          [1],
+        ),
+        flowEdge(
+          "anchor-bottom-edge",
+          sourceBottom,
+          pairBottom,
+          "out-right",
+          "in-left",
+          [2],
+        ),
+      ];
+      if (reverse) edges.reverse();
+      assignRouteLanes(edges, positions);
+      return {
+        primary,
+        pairTop,
+        pairBottom,
+        positions,
+        edges,
+      };
+    };
+    const forward = makeTopology();
+    const reverse = makeTopology(true);
+
+    expect(
+      equalizeComponentColumnSpacing(
+        forward.edges,
+        forward.positions,
+        forward.primary,
+      ),
+    ).toBe(true);
+    expect(
+      equalizeComponentColumnSpacing(
+        reverse.edges,
+        reverse.positions,
+        reverse.primary,
+      ),
+    ).toBe(true);
+    expect(forward.positions).toEqual(reverse.positions);
+    expect(forward.positions.get(forward.pairTop)?.y).toBe(0);
+    expect(
+      forward.positions.get(forward.pairBottom)!.y -
+        forward.positions.get(forward.pairTop)!.y,
+    ).toBeCloseTo(
+      NODE_HEIGHT + adaptiveColumnClearGap(4),
+    );
+    expect(
+      edgeHorizontalRoute(
+        forward.edges.find(
+          (edge) => edge.id === "anchor-top-edge",
+        )!,
+        forward.positions,
+      )?.sourceNeedsCurve,
+    ).toBe(false);
+    expect(
+      edgeHorizontalRoute(
+        forward.edges.find(
+          (edge) => edge.id === "anchor-top-edge",
+        )!,
+        forward.positions,
+      )?.targetNeedsCurve,
+    ).toBe(false);
+  });
+
+  it("leaves an anchored disconnected pair unchanged when compaction is unsafe", () => {
+    const primary = "unsafe-anchor-blocker";
+    const source = "unsafe-anchor-source";
+    const pairTop = "unsafe-anchor-top";
+    const pairBottom = "unsafe-anchor-bottom";
+    const positions = new Map([
+      [primary, { x: 708, y: 140 }],
+      [source, { x: 0, y: 0 }],
+      [pairTop, { x: 708, y: 0 }],
+      [pairBottom, { x: 708, y: 535 }],
+    ]);
+    const edges = [
+      flowEdge(
+        "unsafe-anchor-straight",
+        source,
+        pairTop,
+        "out-right",
+        "in-left",
+        [1],
+      ),
+      flowEdge(
+        "unsafe-anchor-lower",
+        source,
+        pairBottom,
+        "out-right",
+        "in-left",
+        [2],
+      ),
+    ];
+    assignRouteLanes(edges, positions);
+    const positionBaseline = new Map(
+      [...positions.entries()].map(([nodeId, position]) => [
+        nodeId,
+        { ...position },
+      ]),
+    );
+    const routeBaseline = new Map(
+      edges.map((edge) => [edge.id, routeY(edge)]),
+    );
+
+    expect(
+      equalizeComponentColumnSpacing(edges, positions, primary),
+    ).toBe(false);
+    expect(positions).toEqual(positionBaseline);
+    edges.forEach((edge) => {
+      expect(routeY(edge)).toBe(routeBaseline.get(edge.id));
+    });
+  });
+
+  it("retains centered compaction for a disconnected pair without a straight anchor", () => {
+    const primary = "center-fallback-primary";
+    const source = "center-fallback-source";
+    const pairTop = "center-fallback-top";
+    const pairBottom = "center-fallback-bottom";
+    const positions = new Map([
+      [primary, { x: 2000, y: 1000 }],
+      [source, { x: 0, y: 200 }],
+      [pairTop, { x: 708, y: 0 }],
+      [pairBottom, { x: 708, y: 535 }],
+    ]);
+    const edges = [
+      flowEdge(
+        "center-fallback-upper",
+        source,
+        pairTop,
+        "out-right",
+        "in-left",
+        [1],
+      ),
+      flowEdge(
+        "center-fallback-lower",
+        source,
+        pairBottom,
+        "out-right",
+        "in-left",
+        [2],
+      ),
+    ];
+    assignRouteLanes(edges, positions);
+    const pairCenter =
+      (positions.get(pairTop)!.y + positions.get(pairBottom)!.y) / 2;
+
+    expect(
+      equalizeComponentColumnSpacing(edges, positions, primary),
+    ).toBe(true);
+    expect(
+      (positions.get(pairTop)!.y + positions.get(pairBottom)!.y) / 2,
+    ).toBeCloseTo(pairCenter);
+    expect(
+      positions.get(pairBottom)!.y - positions.get(pairTop)!.y,
+    ).toBeCloseTo(
+      NODE_HEIGHT + adaptiveColumnClearGap(4),
+    );
+    expect(routingIsCollisionFree(edges, positions)).toBe(true);
+  });
+
   it("keeps component-local spacing unchanged when an unrelated column component is added or removed", () => {
     const withUnrelatedComponent = reportedReciprocalBundleTopology();
     const unrelatedSource = "reported-bundle-unrelated-source";
@@ -2672,6 +2868,423 @@ describe("graph layout", () => {
         expect(routeY(edge)).toBe(reversedRoutes.get(edge.id));
       });
     },
+  );
+
+  it(
+    "keeps the reported dcc9 component uniform, direct, compact, aligned, and collision-free",
+    async () => {
+      const forwardTrace = reportedDcc9Trace();
+      const reverseTrace = reportedDcc9Trace();
+      reverseTrace.edges.reverse();
+      const [forward, reverse] = await Promise.all([
+        layoutTrace(forwardTrace),
+        layoutTrace(reverseTrace),
+      ]);
+      const positions = new Map(
+        forward.nodes.map((layoutNode) => [
+          layoutNode.id,
+          layoutNode.position,
+        ]),
+      );
+      const reversePositions = new Map(
+        reverse.nodes.map((layoutNode) => [
+          layoutNode.id,
+          layoutNode.position,
+        ]),
+      );
+      const a = REPORTED_DCC9_ADDRESSES;
+      const mainRightColumn = [
+        a.cd71db,
+        a.c02ab1,
+        a.f1445,
+        a.f04c,
+        a.e08a90,
+        a.weth,
+        a.ad5f97,
+      ]
+        .map((nodeId) => positions.get(nodeId)!)
+        .sort((left, right) => left.y - right.y);
+      const gaps = mainRightColumn.slice(1).map(
+        (position, index) =>
+          position.y - mainRightColumn[index].y,
+      );
+      gaps.forEach((gap) => expect(gap).toBeCloseTo(gaps[0]));
+      expect(
+        positions.get(a.disconnectedLeaf)!.y -
+          positions.get(a.zero)!.y,
+      ).toBeCloseTo(
+        NODE_HEIGHT + adaptiveColumnClearGap(4),
+      );
+      expect(
+        positions.get(a.disconnectedSource)?.x,
+      ).not.toBe(positions.get(a.cd71db)?.x);
+      expect(
+        mainRightColumn.some(
+          (position) =>
+            position.y === positions.get(a.disconnectedSource)?.y,
+        ),
+      ).toBe(false);
+
+      const byIndex = new Map(
+        forward.edges.flatMap((edge) =>
+          edge.data!.displayIndexes.map(
+            (index) => [index, edge] as const,
+          ),
+        ),
+      );
+      expect(
+        positions.get(a.disconnectedSource)!.y,
+      ).toBeCloseTo(positions.get(a.zero)!.y);
+      const routeAtPeerIsStraight = (
+        edge: TransferFlowEdge,
+        peerId: string,
+      ) => {
+        const geometry = edgeHorizontalRoute(edge, positions)!;
+        const portY =
+          edge.source === peerId
+            ? geometry.segments[0].from.y
+            : geometry.segments.at(-1)!.to.y;
+        return Math.abs(edge.data!.routeY - portY) < 1;
+      };
+      const transfer3Geometry = edgeHorizontalRoute(
+        byIndex.get(3)!,
+        positions,
+      )!;
+      expect(transfer3Geometry.sourceNeedsCurve).toBe(false);
+      expect(transfer3Geometry.targetNeedsCurve).toBe(false);
+      expect(byIndex.get(3)!.data!.routeY).toBeCloseTo(
+        transfer3Geometry.segments[0].from.y,
+      );
+      expect(byIndex.get(3)!.data!.routeY).toBeCloseTo(
+        transfer3Geometry.segments.at(-1)!.to.y,
+      );
+      const transfer4Geometry = edgeHorizontalRoute(
+        byIndex.get(4)!,
+        positions,
+      )!;
+      expect(transfer4Geometry.sourceNeedsCurve).toBe(true);
+      expect(transfer4Geometry.targetNeedsCurve).toBe(true);
+      const transfer6Geometry = edgeHorizontalRoute(
+        byIndex.get(6)!,
+        positions,
+      )!;
+      expect(transfer6Geometry.sourceNeedsCurve).toBe(true);
+      expect(transfer6Geometry.targetNeedsCurve).toBe(false);
+      expect(byIndex.get(6)!.data!.routeY).toBeCloseTo(
+        transfer6Geometry.segments.at(-1)!.to.y,
+      );
+      [
+        [a.e08a90, [byIndex.get(10)!, byIndex.get(11)!]],
+        [a.weth, [byIndex.get(15)!, byIndex.get(16)!]],
+        [
+          a.ad5f97,
+          forward.edges.filter(
+            (edge) =>
+              edge.source === a.ad5f97 ||
+              edge.target === a.ad5f97,
+          ),
+        ],
+      ].forEach(([peerId, peerEdges]) => {
+        expect(
+          (peerEdges as TransferFlowEdge[]).some((edge) =>
+            routeAtPeerIsStraight(edge, peerId as string)
+          ),
+        ).toBe(true);
+      });
+      expect(
+        Math.abs(
+          byIndex.get(10)!.data!.routeY -
+            byIndex.get(11)!.data!.routeY,
+        ),
+      ).toBeCloseTo(MIN_HORIZONTAL_LANE_GAP);
+      expect(
+        Math.abs(
+          byIndex.get(15)!.data!.routeY -
+            byIndex.get(16)!.data!.routeY,
+        ),
+      ).toBeCloseTo(MIN_HORIZONTAL_LANE_GAP);
+      expect(
+        Math.abs(
+          byIndex.get(3)!.data!.routeY -
+            byIndex.get(4)!.data!.routeY,
+        ),
+      ).toBeCloseTo(MIN_HORIZONTAL_LANE_GAP);
+
+      const receiverX = positions.get(a.receiver)!.x;
+      const rightX = positions.get(a.cd71db)!.x;
+      const alignedLabelXs = forward.edges
+        .filter((edge) => {
+          const sourceX = positions.get(edge.source)!.x;
+          const targetX = positions.get(edge.target)!.x;
+          return (
+            Math.min(sourceX, targetX) ===
+              Math.min(receiverX, rightX) &&
+            Math.max(sourceX, targetX) ===
+              Math.max(receiverX, rightX)
+          );
+        })
+        .map((edge) => {
+          const route = edgeHorizontalRoute(edge, positions)!;
+          return edgeLabelGeometry({
+            label: edge.data!.label,
+            horizontalStartX: route.horizontalStartX,
+            horizontalEndX: route.horizontalEndX,
+            routeY: edge.data!.routeY,
+            labelBias: edge.data!.labelBias,
+          }).rect.x;
+        });
+      alignedLabelXs.forEach((labelX) =>
+        expect(labelX).toBeCloseTo(alignedLabelXs[0])
+      );
+      const disconnectedLabelXs = [3, 4, 6].map((index) => {
+        const edge = byIndex.get(index)!;
+        const route = edgeHorizontalRoute(edge, positions)!;
+        return edgeLabelGeometry({
+          label: edge.data!.label,
+          horizontalStartX: route.horizontalStartX,
+          horizontalEndX: route.horizontalEndX,
+          routeY: edge.data!.routeY,
+          labelBias: edge.data!.labelBias,
+        }).rect.x;
+      });
+      disconnectedLabelXs.forEach((labelX) =>
+        expect(labelX).toBeCloseTo(disconnectedLabelXs[0])
+      );
+      expect(
+        routingIsCollisionFree(forward.edges, positions),
+      ).toBe(true);
+
+      const receiverRightEdges = forward.edges
+        .filter(
+          (edge) =>
+            (edge.source === a.receiver ||
+              edge.target === a.receiver) &&
+            positions.get(
+              edge.source === a.receiver
+                ? edge.target
+                : edge.source,
+            )!.x > receiverX,
+        )
+        .map((edge) => {
+          const peerId =
+            edge.source === a.receiver
+              ? edge.target
+              : edge.source;
+          return {
+            peerY: positions.get(peerId)!.y,
+            portRatio:
+              edge.source === a.receiver
+                ? edge.data!.sourcePortRatio
+                : edge.data!.targetPortRatio,
+          };
+        })
+        .sort(
+          (left, right) =>
+            left.peerY - right.peerY ||
+            left.portRatio - right.portRatio,
+        );
+      expect(receiverRightEdges.map(({ portRatio }) => portRatio))
+        .toEqual(
+          receiverRightEdges
+            .map(({ portRatio }) => portRatio)
+            .sort((left, right) => left - right),
+        );
+
+      expect(reversePositions).toEqual(positions);
+      const reverseEdges = new Map(
+        reverse.edges.map((edge) => [edge.id, edge]),
+      );
+      forward.edges.forEach((edge) => {
+        const reversed = reverseEdges.get(edge.id)!;
+        expect({
+          routeY: reversed.data!.routeY,
+          labelBias: reversed.data!.labelBias,
+          sourceCurveMode: reversed.data!.sourceCurveMode,
+          targetCurveMode: reversed.data!.targetCurveMode,
+          sourcePortRatio: reversed.data!.sourcePortRatio,
+          targetPortRatio: reversed.data!.targetPortRatio,
+          sourceHandle: reversed.sourceHandle,
+          targetHandle: reversed.targetHandle,
+        }).toEqual({
+          routeY: edge.data!.routeY,
+          labelBias: edge.data!.labelBias,
+          sourceCurveMode: edge.data!.sourceCurveMode,
+          targetCurveMode: edge.data!.targetCurveMode,
+          sourcePortRatio: edge.data!.sourcePortRatio,
+          targetPortRatio: edge.data!.targetPortRatio,
+          sourceHandle: edge.sourceHandle,
+          targetHandle: edge.targetHandle,
+        });
+      });
+      expect(
+        reversePositions.get(a.disconnectedSource),
+      ).toEqual(positions.get(a.disconnectedSource));
+      expect(
+        reversePositions.get(a.zero),
+      ).toEqual(positions.get(a.zero));
+      expect(
+        reversePositions.get(a.disconnectedLeaf),
+      ).toEqual(positions.get(a.disconnectedLeaf));
+
+      const routingSnapshot = (edge: TransferFlowEdge) => ({
+        routeY: edge.data!.routeY,
+        labelBias: edge.data!.labelBias,
+        sourceCurveMode: edge.data!.sourceCurveMode,
+        targetCurveMode: edge.data!.targetCurveMode,
+        sourcePortRatio: edge.data!.sourcePortRatio,
+        targetPortRatio: edge.data!.targetPortRatio,
+        sourceHandle: edge.sourceHandle,
+        targetHandle: edge.targetHandle,
+      });
+      const expandedPositions = new Map(
+        [...positions.entries()].map(([nodeId, position]) => [
+          nodeId,
+          { ...position },
+        ]),
+      );
+      const disconnectedSourceY =
+        expandedPositions.get(a.disconnectedSource)!.y;
+      expandedPositions.set(a.zero, {
+        ...positions.get(a.zero)!,
+        y: disconnectedSourceY,
+      });
+      expandedPositions.set(a.disconnectedLeaf, {
+        ...positions.get(a.disconnectedLeaf)!,
+        y: disconnectedSourceY + 535,
+      });
+      const expandedEdges = cloneEdges(forward.edges);
+      const disconnectedNodeIds = new Set([
+        a.disconnectedSource,
+        a.zero,
+        a.disconnectedLeaf,
+      ]);
+      const expandedDisconnectedEdges = expandedEdges.filter(
+        (edge) =>
+          disconnectedNodeIds.has(edge.source) &&
+          disconnectedNodeIds.has(edge.target),
+      );
+      assignRouteLanes(
+        expandedDisconnectedEdges,
+        expandedPositions,
+      );
+      alignColumnPairLabels(
+        expandedDisconnectedEdges,
+        expandedPositions,
+      );
+      const expandedByIndex = new Map(
+        expandedEdges.flatMap((edge) =>
+          edge.data!.displayIndexes.map(
+            (index) => [index, edge] as const,
+          ),
+        ),
+      );
+      const transfer3Baseline = routingSnapshot(
+        expandedByIndex.get(3)!,
+      );
+      const transfer4Baseline = routingSnapshot(
+        expandedByIndex.get(4)!,
+      );
+      const {
+        routeY: transfer6BaselineRouteY,
+        ...transfer6BaselineRouting
+      } = routingSnapshot(expandedByIndex.get(6)!);
+      const disconnectedSourceBaseline = {
+        ...expandedPositions.get(a.disconnectedSource)!,
+      };
+      const anchoredZeroBaseline = {
+        ...expandedPositions.get(a.zero)!,
+      };
+      const primaryPositionBaseline = new Map(
+        [...expandedPositions.entries()]
+          .filter(([nodeId]) => !disconnectedNodeIds.has(nodeId))
+          .map(([nodeId, position]) => [
+            nodeId,
+            { ...position },
+          ]),
+      );
+      const primaryRoutingBaseline = new Map(
+        expandedEdges
+          .filter(
+            (edge) =>
+              !disconnectedNodeIds.has(edge.source) &&
+              !disconnectedNodeIds.has(edge.target),
+          )
+          .map((edge) => [edge.id, routingSnapshot(edge)]),
+      );
+
+      expect(
+        equalizeComponentColumnSpacing(
+          expandedEdges,
+          expandedPositions,
+          a.sender,
+        ),
+      ).toBe(true);
+      alignDisconnectedComponents(
+        expandedEdges,
+        expandedPositions,
+        a.sender,
+      );
+      expect(
+        expandedPositions.get(a.disconnectedSource),
+      ).toEqual(disconnectedSourceBaseline);
+      expect(expandedPositions.get(a.zero)).toEqual(
+        anchoredZeroBaseline,
+      );
+      expect(
+        expandedPositions.get(a.disconnectedLeaf)!.y -
+          expandedPositions.get(a.zero)!.y,
+      ).toBeCloseTo(
+        NODE_HEIGHT + adaptiveColumnClearGap(4),
+      );
+      primaryPositionBaseline.forEach((position, nodeId) => {
+        expect(expandedPositions.get(nodeId)).toEqual(position);
+      });
+      primaryRoutingBaseline.forEach((routing, edgeId) => {
+        expect(
+          routingSnapshot(
+            expandedEdges.find((edge) => edge.id === edgeId)!,
+          ),
+        ).toEqual(routing);
+      });
+      const compactedByIndex = new Map(
+        expandedEdges.flatMap((edge) =>
+          edge.data!.displayIndexes.map(
+            (index) => [index, edge] as const,
+          ),
+        ),
+      );
+      expect(
+        routingSnapshot(compactedByIndex.get(3)!),
+      ).toEqual(transfer3Baseline);
+      expect(
+        routingSnapshot(compactedByIndex.get(4)!),
+      ).toEqual(transfer4Baseline);
+      const {
+        routeY: transfer6CompactedRouteY,
+        ...transfer6CompactedRouting
+      } = routingSnapshot(compactedByIndex.get(6)!);
+      expect(transfer6CompactedRouting).toEqual(
+        transfer6BaselineRouting,
+      );
+      expect(transfer6CompactedRouteY).toBeLessThan(
+        transfer6BaselineRouteY,
+      );
+      const compactedTransfer6Geometry = edgeHorizontalRoute(
+        compactedByIndex.get(6)!,
+        expandedPositions,
+      )!;
+      expect(compactedTransfer6Geometry.targetNeedsCurve).toBe(false);
+      expect(transfer6CompactedRouteY).toBeCloseTo(
+        compactedTransfer6Geometry.segments.at(-1)!.to.y,
+      );
+      expect(
+        routingIsCollisionFree(
+          expandedEdges,
+          expandedPositions,
+        ),
+      ).toBe(true);
+    },
+    60_000,
   );
 
   it("uses same-length custom arrow markers for transfer edges", () => {

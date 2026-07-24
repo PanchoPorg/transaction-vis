@@ -1240,12 +1240,32 @@ function labelSlot(
     }) ?? null;
 }
 
-function routeModes(geometry: EdgeRouteGeometry) {
+function routeModes(
+  geometry: EdgeRouteGeometry,
+  includeExpanded = false,
+) {
   const modes: Array<[EdgeCurveMode, EdgeCurveMode]> = [["default", "default"]];
   if (geometry.sourceNeedsCurve) modes.push(["compact", "default"]);
   if (geometry.targetNeedsCurve) modes.push(["default", "compact"]);
   if (geometry.sourceNeedsCurve && geometry.targetNeedsCurve) {
     modes.push(["compact", "compact"]);
+  }
+  if (includeExpanded && geometry.sourceNeedsCurve) {
+    modes.push(["expanded", "default"]);
+  }
+  if (includeExpanded && geometry.targetNeedsCurve) {
+    modes.push(["default", "expanded"]);
+  }
+  if (
+    includeExpanded &&
+    geometry.sourceNeedsCurve &&
+    geometry.targetNeedsCurve
+  ) {
+    modes.push(
+      ["expanded", "compact"],
+      ["compact", "expanded"],
+      ["expanded", "expanded"],
+    );
   }
   return modes;
 }
@@ -1802,6 +1822,257 @@ function assignmentCurveCount(assignment: RouteAssignment) {
   );
 }
 
+function entryPointAtNode(entry: RouteEntry, nodeId: string) {
+  if (entry.edge.source === nodeId) return entry.sourcePoint;
+  if (entry.edge.target === nodeId) return entry.targetPoint;
+  return null;
+}
+
+function expandedAssignmentOptions(
+  entry: RouteEntry,
+  routeY: number,
+  positions: Map<string, { x: number; y: number }>,
+  assignments: RouteAssignment[],
+) {
+  const baseGeometry = routeGeometryWithModes(
+    entry,
+    routeY,
+    "default",
+    "default",
+  );
+  return routeModes(baseGeometry, true).flatMap(
+    ([sourceCurveMode, targetCurveMode]) => {
+      const assignment = assignmentForRoute(
+        entry,
+        routeY,
+        sourceCurveMode,
+        targetCurveMode,
+        positions,
+        assignments,
+        "all",
+      );
+      return assignment ? [assignment] : [];
+    },
+  );
+}
+
+function optimizeMixedSidePeerAssignments(
+  component: RouteEntry[],
+  positions: Map<string, { x: number; y: number }>,
+  assignments: RouteAssignment[],
+) {
+  const mixedGroups = [
+    ...new Set(
+      component.flatMap(
+        (entry) => entry.edge.data?.mixedDirectionGroups ?? [],
+      ),
+    ),
+  ].sort();
+
+  for (const mixedGroup of mixedGroups) {
+    const hubId = mixedDirectionGroupNodeId(mixedGroup);
+    const groupEntries = component.filter((entry) =>
+      entry.edge.data?.mixedDirectionGroups?.includes(mixedGroup)
+    );
+    const byPeer = new Map<string, RouteEntry[]>();
+    groupEntries.forEach((entry) => {
+      const peerId =
+        entry.edge.source === hubId
+          ? entry.edge.target
+          : entry.edge.source;
+      const peerEntries = byPeer.get(peerId) ?? [];
+      peerEntries.push(entry);
+      byPeer.set(peerId, peerEntries);
+    });
+    const peers = [...byPeer.entries()]
+      .filter(([, entries]) => {
+        if (entries.length === 1) return true;
+        return (
+          entries.length === 2 &&
+          entries[0].edge.source === entries[1].edge.target &&
+          entries[0].edge.target === entries[1].edge.source
+        );
+      })
+      .sort(([aId], [bId]) => {
+        const a = positions.get(aId) ?? { x: 0, y: 0 };
+        const b = positions.get(bId) ?? { x: 0, y: 0 };
+        return a.y - b.y || a.x - b.x || aId.localeCompare(bId);
+      });
+    const optimizedEntries = new Set(
+      peers.flatMap(([, entries]) => entries),
+    );
+    if (
+      optimizedEntries.size === 0 ||
+      optimizedEntries.size !== groupEntries.length
+    ) {
+      continue;
+    }
+    const fixedAssignments = assignments.filter(
+      (assignment) => !optimizedEntries.has(assignment.entry),
+    );
+    const baselineByEntry = new Map(
+      assignments.map((assignment) => [assignment.entry, assignment]),
+    );
+    const needsOptimization = peers.some(([peerId, peerEntries]) => {
+      const hasStraightIncidentRoute = peerEntries.some((entry) => {
+        const point = entryPointAtNode(entry, peerId);
+        const assignment = baselineByEntry.get(entry);
+        return (
+          point &&
+          assignment &&
+          Math.abs(assignment.routeY - point.y) < 1
+        );
+      });
+      const hasCompactReciprocalGap =
+        peerEntries.length !== 2 ||
+        Math.abs(
+          Math.abs(
+            baselineByEntry.get(peerEntries[0])!.routeY -
+              baselineByEntry.get(peerEntries[1])!.routeY,
+          ) - MIN_HORIZONTAL_LANE_GAP,
+        ) <= ROUTE_EPSILON;
+      return !hasStraightIncidentRoute || !hasCompactReciprocalGap;
+    });
+    if (!needsOptimization) continue;
+
+    type SearchState = {
+      assignments: RouteAssignment[];
+      expandedCount: number;
+      displacement: number;
+      stableKey: string;
+    };
+    let states: SearchState[] = [{
+      assignments: [],
+      expandedCount: 0,
+      displacement: 0,
+      stableKey: "",
+    }];
+    let groupFailed = false;
+
+    for (const [peerId, peerEntries] of peers) {
+      const nextStates: SearchState[] = [];
+      const anchors = [...peerEntries].sort((a, b) => {
+        const aPoint = entryPointAtNode(a, peerId);
+        const bPoint = entryPointAtNode(b, peerId);
+        return (
+          (aPoint?.y ?? 0) - (bPoint?.y ?? 0) ||
+          a.displayOrder - b.displayOrder ||
+          a.edge.id.localeCompare(b.edge.id)
+        );
+      });
+
+      states.forEach((state) => {
+        const existing = [...fixedAssignments, ...state.assignments];
+        anchors.forEach((anchor) => {
+          const anchorPoint = entryPointAtNode(anchor, peerId);
+          if (!anchorPoint) return;
+          expandedAssignmentOptions(
+            anchor,
+            anchorPoint.y,
+            positions,
+            existing,
+          ).forEach((anchorAssignment) => {
+            const configurations: RouteAssignment[][] = [];
+            if (peerEntries.length === 1) {
+              configurations.push([anchorAssignment]);
+            } else {
+              const companion = peerEntries.find(
+                (entry) => entry !== anchor,
+              );
+              const companionPoint = companion
+                ? entryPointAtNode(companion, peerId)
+                : null;
+              if (!companion || !companionPoint) return;
+              const direction =
+                companionPoint.y >= anchorPoint.y ? 1 : -1;
+              expandedAssignmentOptions(
+                companion,
+                anchorPoint.y +
+                  direction * MIN_HORIZONTAL_LANE_GAP,
+                positions,
+                [...existing, anchorAssignment],
+              ).forEach((companionAssignment) =>
+                configurations.push([
+                  anchorAssignment,
+                  companionAssignment,
+                ])
+              );
+            }
+
+            configurations.forEach((configuration) => {
+              nextStates.push({
+                assignments: [
+                  ...state.assignments,
+                  ...configuration,
+                ],
+                expandedCount:
+                  state.expandedCount +
+                  configuration.reduce(
+                    (count, assignment) =>
+                      count +
+                      Number(
+                        assignment.sourceCurveMode === "expanded",
+                      ) +
+                      Number(
+                        assignment.targetCurveMode === "expanded",
+                      ),
+                    0,
+                  ),
+                displacement:
+                  state.displacement +
+                  configuration.reduce(
+                    (total, assignment) =>
+                      total +
+                      Math.abs(
+                        assignment.routeY -
+                          baselineByEntry.get(assignment.entry)!.routeY,
+                      ),
+                    0,
+                  ),
+                stableKey:
+                  `${state.stableKey}|` +
+                  configuration
+                    .map(
+                      (assignment) =>
+                        `${assignment.entry.edge.id}:` +
+                        `${assignment.routeY}:` +
+                        `${assignment.sourceCurveMode}:` +
+                        assignment.targetCurveMode,
+                    )
+                    .join("|"),
+              });
+            });
+          });
+        });
+      });
+      if (nextStates.length === 0) {
+        groupFailed = true;
+        break;
+      }
+      nextStates.sort(
+        (a, b) =>
+          a.expandedCount - b.expandedCount ||
+          a.displacement - b.displacement ||
+          a.stableKey.localeCompare(b.stableKey),
+      );
+      states = nextStates.slice(0, 128);
+    }
+
+    if (groupFailed) continue;
+    const best = states[0];
+    if (!best || best.assignments.length !== optimizedEntries.size) {
+      continue;
+    }
+    assignments.splice(
+      0,
+      assignments.length,
+      ...fixedAssignments,
+      ...best.assignments,
+    );
+  }
+
+}
+
 function rebalanceCompactReciprocalLanes(
   entries: RouteEntry[],
   positions: Map<string, { x: number; y: number }>,
@@ -2304,6 +2575,12 @@ function assignComponentLanes(
     assignments.forEach(writeAssignment);
     rebalanceCompactReciprocalLanes(component, positions, assignments);
     compactReciprocalLanes(component, positions, assignments);
+    optimizeMixedSidePeerAssignments(
+      component,
+      positions,
+      assignments,
+    );
+    assignments.forEach(writeAssignment);
     return;
   }
 }
@@ -2753,7 +3030,14 @@ export function assignMixedDirectionFanoutPorts(
             edgeDisplayOrder(a) - edgeDisplayOrder(b) ||
             a.id.localeCompare(b.id),
         )[0];
-      if (anchor) {
+      const hasReciprocalPeer = sideEdges.some((edge, index) =>
+        sideEdges.slice(index + 1).some(
+          (other) =>
+            edge.source === other.target &&
+            edge.target === other.source,
+        )
+      );
+      if (anchor || (crossingCounts.size > 0 && hasReciprocalPeer)) {
         affectedSides.add(key);
       }
     });
@@ -2811,7 +3095,7 @@ function routedEdgeLabel(
   });
 }
 
-function routingIsCollisionFree(
+export function routingIsCollisionFree(
   edges: TransferFlowEdge[],
   positions: Map<string, { x: number; y: number }>,
 ) {
@@ -3310,6 +3594,471 @@ function minimumColumnNodeTopGap(nodeCount: number) {
 
 function columnClusterThreshold(nodeCount: number) {
   return minimumColumnNodeTopGap(nodeCount) + NODE_ROUTE_CLEARANCE;
+}
+
+function copyRoutingState(
+  targetEdges: TransferFlowEdge[],
+  sourceEdges: TransferFlowEdge[],
+) {
+  const sourceById = new Map(sourceEdges.map((edge) => [edge.id, edge]));
+  targetEdges.forEach((edge) => {
+    const source = sourceById.get(edge.id);
+    if (!source?.data) return;
+    edge.sourceHandle = source.sourceHandle;
+    edge.targetHandle = source.targetHandle;
+    edge.data = {
+      ...edge.data!,
+      ...source.data,
+    };
+  });
+}
+
+type ColumnSpacingAnchor = {
+  nodeId: string;
+  edgeIds: string[];
+  stableKey: string;
+};
+
+type ColumnSpacingPlacement = {
+  gap: number;
+  firstY: number;
+  anchor: ColumnSpacingAnchor | undefined;
+  stableKey: string;
+};
+
+function straightColumnSpacingAnchors(
+  ordered: ComponentPositionColumn["items"],
+  componentEdges: TransferFlowEdge[],
+  positions: Map<string, { x: number; y: number }>,
+) {
+  const columnNodeIds = new Set(
+    ordered.map((item) => item.nodeId),
+  );
+  const edgeIdsByNode = new Map<string, Set<string>>();
+
+  componentEdges.forEach((edge) => {
+    const geometry = edgeHorizontalRoute(edge, positions);
+    if (
+      !geometry ||
+      geometry.sourceNeedsCurve ||
+      geometry.targetNeedsCurve
+    ) {
+      return;
+    }
+
+    [
+      { nodeId: edge.source, peerId: edge.target },
+      { nodeId: edge.target, peerId: edge.source },
+    ].forEach(({ nodeId, peerId }) => {
+      if (
+        !columnNodeIds.has(nodeId) ||
+        columnNodeIds.has(peerId)
+      ) {
+        return;
+      }
+      const edgeIds = edgeIdsByNode.get(nodeId) ?? new Set<string>();
+      edgeIds.add(edge.id);
+      edgeIdsByNode.set(nodeId, edgeIds);
+    });
+  });
+
+  const anchors: ColumnSpacingAnchor[] = [...edgeIdsByNode.entries()]
+    .map(([nodeId, edgeIds]) => {
+      const orderedEdgeIds = [...edgeIds].sort((a, b) =>
+        a.localeCompare(b),
+      );
+      return {
+        nodeId,
+        edgeIds: orderedEdgeIds,
+        stableKey: `${nodeId}:${orderedEdgeIds.join(",")}`,
+      };
+    })
+    .sort((a, b) => a.stableKey.localeCompare(b.stableKey));
+  return anchors;
+}
+
+export function equalizeComponentColumnSpacing(
+  edges: TransferFlowEdge[],
+  positions: Map<string, { x: number; y: number }>,
+  primaryNodeId?: string,
+) {
+  let changed = false;
+  const columns = buildComponentPositionColumns(edges, positions);
+  const componentIds = connectedComponentIds(edges, positions);
+  const primaryComponentId = primaryNodeId
+    ? componentIds.get(primaryNodeId)
+    : undefined;
+
+  columns.forEach((column) => {
+    if (column.items.length <= 1) return;
+    const ordered = [...column.items].sort(
+      (a, b) =>
+        a.position.y - b.position.y ||
+        a.nodeId.localeCompare(b.nodeId),
+    );
+    const isDisconnectedPair =
+      ordered.length === 2 &&
+      primaryComponentId !== undefined &&
+      column.componentId !== primaryComponentId;
+    if (ordered.length === 2 && !isDisconnectedPair) return;
+
+    const targetGap = isDisconnectedPair
+      ? minimumColumnNodeTopGap(DENSE_COLUMN_NODE_COUNT)
+      : minimumColumnNodeTopGap(ordered.length);
+    const currentGap =
+      (ordered.at(-1)!.position.y - ordered[0].position.y) /
+      (ordered.length - 1);
+    if (
+      isDisconnectedPair &&
+      currentGap <= targetGap + ROUTE_EPSILON
+    ) {
+      return;
+    }
+    if (
+      !isDisconnectedPair &&
+      Math.abs(currentGap - targetGap) < 1
+    ) {
+      return;
+    }
+    const minimumGap = MIN_COLUMN_NODE_TOP_GAP;
+    const gapCandidates = (
+      isDisconnectedPair
+        ? [targetGap]
+        : [
+            targetGap,
+            currentGap,
+            targetGap + MIN_HORIZONTAL_LANE_GAP,
+            Math.max(
+              minimumGap,
+              targetGap - MIN_HORIZONTAL_LANE_GAP,
+            ),
+            targetGap + MIN_HORIZONTAL_LANE_GAP * 2,
+          ]
+    )
+      .map((gap) => Number(gap.toFixed(6)))
+      .filter(
+        (gap, index, values) =>
+          gap >= minimumGap - ROUTE_EPSILON &&
+          values.indexOf(gap) === index,
+      )
+      .sort(
+        (a, b) =>
+          Math.abs(a - targetGap) - Math.abs(b - targetGap) ||
+          a - b,
+      );
+    const currentCenter =
+      (ordered[0].position.y + ordered.at(-1)!.position.y) / 2;
+    const componentEdges = edges.filter(
+      (edge) =>
+        componentIds.get(edge.source) === column.componentId &&
+        componentIds.get(edge.target) === column.componentId,
+    );
+    const baselineStraightEdgeIds = new Set(
+      componentEdges
+        .filter((edge) => {
+          const geometry = edgeHorizontalRoute(edge, positions);
+          return (
+            geometry &&
+            !geometry.sourceNeedsCurve &&
+            !geometry.targetNeedsCurve
+          );
+        })
+        .map((edge) => edge.id),
+    );
+    const anchors = isDisconnectedPair
+      ? straightColumnSpacingAnchors(
+          ordered,
+          componentEdges,
+          positions,
+        )
+      : [];
+    const placementCandidates =
+      gapCandidates.flatMap<ColumnSpacingPlacement>((gap) => {
+        if (anchors.length === 0) {
+          return [
+            {
+              gap,
+              firstY:
+                currentCenter - (gap * (ordered.length - 1)) / 2,
+              anchor: undefined,
+              stableKey: `center:${gap}`,
+            },
+          ];
+        }
+        return anchors.map((anchor) => {
+          const anchorIndex = ordered.findIndex(
+            (item) => item.nodeId === anchor.nodeId,
+          );
+          return {
+            gap,
+            firstY:
+              ordered[anchorIndex].position.y - anchorIndex * gap,
+            anchor,
+            stableKey: anchor.stableKey,
+          };
+        });
+      });
+    const acceptedCandidates: Array<{
+      positions: Map<string, { x: number; y: number }>;
+      edges: TransferFlowEdge[];
+      componentId?: string;
+      straightCount: number;
+      curvedEndpointCount: number;
+      displacement: number;
+      stableKey: string;
+    }> = [];
+
+    for (const placement of placementCandidates) {
+      const candidatePositions = new Map(
+        [...positions.entries()].map(([nodeId, position]) => [
+          nodeId,
+          { ...position },
+        ]),
+      );
+      ordered.forEach((item, index) => {
+        candidatePositions.set(item.nodeId, {
+          ...item.position,
+          y: Number(
+            (placement.firstY + index * placement.gap).toFixed(6),
+          ),
+        });
+      });
+      if (!nodeBoxesHaveClearance(candidatePositions)) continue;
+
+      const candidateEdges = cloneRoutingEdges(edges);
+      let candidateComponentEdges: TransferFlowEdge[];
+      if (isDisconnectedPair) {
+        candidateComponentEdges = candidateEdges.filter(
+          (edge) =>
+            componentIds.get(edge.source) === column.componentId &&
+            componentIds.get(edge.target) === column.componentId,
+        );
+        assignRouteLanes(candidateComponentEdges, candidatePositions);
+        alignColumnPairLabels(
+          candidateComponentEdges,
+          candidatePositions,
+        );
+      } else {
+        assignRouteLanes(candidateEdges, candidatePositions);
+        candidateComponentEdges = candidateEdges.filter(
+          (edge) =>
+            componentIds.get(edge.source) === column.componentId &&
+            componentIds.get(edge.target) === column.componentId,
+        );
+      }
+      const candidateById = new Map(
+        candidateEdges.map((edge) => [edge.id, edge]),
+      );
+      if (
+        placement.anchor &&
+        !placement.anchor.edgeIds.every((edgeId) => {
+          const candidate = candidateById.get(edgeId);
+          const geometry = candidate
+            ? edgeHorizontalRoute(candidate, candidatePositions)
+            : null;
+          return (
+            geometry &&
+            !geometry.sourceNeedsCurve &&
+            !geometry.targetNeedsCurve
+          );
+        })
+      ) {
+        continue;
+      }
+      if (
+        !routingIsCollisionFree(candidateEdges, candidatePositions) ||
+        !dynamicReciprocalBlocksAreContiguous(
+          candidateEdges,
+          candidatePositions,
+        )
+      ) {
+        continue;
+      }
+      const candidateGeometries = new Map(
+        candidateComponentEdges.map((edge) => [
+          edge.id,
+          edgeHorizontalRoute(edge, candidatePositions),
+        ]),
+      );
+      acceptedCandidates.push({
+        positions: candidatePositions,
+        edges: candidateEdges,
+        componentId: isDisconnectedPair
+          ? column.componentId
+          : undefined,
+        straightCount: [...baselineStraightEdgeIds].filter(
+          (edgeId) => {
+            const geometry = candidateGeometries.get(edgeId);
+            return (
+              geometry &&
+              !geometry.sourceNeedsCurve &&
+              !geometry.targetNeedsCurve
+            );
+          },
+        ).length,
+        curvedEndpointCount: [
+          ...candidateGeometries.values(),
+        ].reduce(
+          (count, geometry) =>
+            count +
+            Number(geometry?.sourceNeedsCurve) +
+            Number(geometry?.targetNeedsCurve),
+          0,
+        ),
+        displacement: ordered.reduce(
+          (total, item) =>
+            total +
+            Math.abs(
+              candidatePositions.get(item.nodeId)!.y -
+                item.position.y,
+            ),
+          0,
+        ),
+        stableKey: placement.stableKey,
+      });
+      if (anchors.length === 0) break;
+    }
+
+    const accepted = (
+      anchors.length > 0
+        ? acceptedCandidates.sort(
+            (a, b) =>
+              b.straightCount - a.straightCount ||
+              a.curvedEndpointCount - b.curvedEndpointCount ||
+              a.displacement - b.displacement ||
+              a.stableKey.localeCompare(b.stableKey),
+          )
+        : acceptedCandidates
+    )[0];
+    if (!accepted) return;
+    ordered.forEach((item) => {
+      positions.set(item.nodeId, accepted.positions.get(item.nodeId)!);
+    });
+    if (accepted.componentId === undefined) {
+      copyRoutingState(edges, accepted.edges);
+    } else {
+      const acceptedComponentId = accepted.componentId;
+      copyRoutingState(
+        edges.filter(
+          (edge) =>
+            componentIds.get(edge.source) === acceptedComponentId &&
+            componentIds.get(edge.target) === acceptedComponentId,
+        ),
+        accepted.edges.filter(
+          (edge) =>
+            componentIds.get(edge.source) === acceptedComponentId &&
+            componentIds.get(edge.target) === acceptedComponentId,
+        ),
+      );
+    }
+    changed = true;
+  });
+
+  return changed;
+}
+
+export function alignColumnPairLabels(
+  edges: TransferFlowEdge[],
+  positions: Map<string, { x: number; y: number }>,
+) {
+  const componentIds = connectedComponentIds(edges, positions);
+  const groups = new Map<string, TransferFlowEdge[]>();
+  edges.forEach((edge) => {
+    const sourcePosition = positions.get(edge.source);
+    const targetPosition = positions.get(edge.target);
+    if (!sourcePosition || !targetPosition) return;
+    const minX = Math.min(sourcePosition.x, targetPosition.x);
+    const maxX = Math.max(sourcePosition.x, targetPosition.x);
+    if (maxX - minX <= COLUMN_X_TOLERANCE) return;
+    const componentId =
+      componentIds.get(edge.source) ??
+      componentIds.get(edge.target) ??
+      edge.source;
+    const key =
+      `${componentId}:` +
+      `${Number(minX.toFixed(6))}<->${Number(maxX.toFixed(6))}`;
+    const group = groups.get(key) ?? [];
+    group.push(edge);
+    groups.set(key, group);
+  });
+
+  let changed = false;
+  [...groups.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .forEach(([, group]) => {
+      if (group.length <= 1) return;
+      const slots = group.flatMap((edge) => {
+        const geometry = edgeHorizontalRoute(edge, positions);
+        if (!geometry || !edge.data) return [];
+        const label = edgeLabelGeometry({
+          label: edge.data.label,
+          horizontalStartX: geometry.horizontalStartX,
+          horizontalEndX: geometry.horizontalEndX,
+          routeY: edge.data.routeY,
+          labelBias: edge.data.labelBias,
+        });
+        return [{
+          edge,
+          geometry,
+          width: label.width,
+          currentLeft: label.rect.x,
+          minLeft: geometry.horizontalMinX,
+          maxLeft: geometry.horizontalMaxX - label.width,
+        }];
+      });
+      if (slots.length !== group.length) return;
+
+      const minLeft = Math.max(...slots.map((slot) => slot.minLeft));
+      const maxLeft = Math.min(...slots.map((slot) => slot.maxLeft));
+      if (minLeft > maxLeft + ROUTE_EPSILON) return;
+      const orderedCurrentLeft = slots
+        .map((slot) => slot.currentLeft)
+        .sort((a, b) => a - b);
+      const preferredLeft =
+        orderedCurrentLeft[Math.floor(orderedCurrentLeft.length / 2)];
+      const leftCandidates = [
+        Math.min(maxLeft, Math.max(minLeft, preferredLeft)),
+        minLeft,
+        maxLeft,
+      ].filter(
+        (left, index, values) =>
+          values.findIndex(
+            (candidate) => Math.abs(candidate - left) <= ROUTE_EPSILON,
+          ) === index,
+      );
+
+      for (const left of leftCandidates) {
+        const candidateEdges = cloneRoutingEdges(edges);
+        const candidateById = new Map(
+          candidateEdges.map((edge) => [edge.id, edge]),
+        );
+        slots.forEach((slot) => {
+          const candidate = candidateById.get(slot.edge.id);
+          if (!candidate?.data) return;
+          const denominator =
+            slot.geometry.horizontalEndX -
+            slot.geometry.horizontalStartX;
+          const centerX = left + slot.width / 2;
+          candidate.data.labelBias =
+            Math.abs(denominator) <= ROUTE_EPSILON
+              ? 0.5
+              : Math.min(
+                  1,
+                  Math.max(
+                    0,
+                    (centerX - slot.geometry.horizontalStartX) /
+                      denominator,
+                  ),
+                );
+        });
+        if (!routingIsCollisionFree(candidateEdges, positions)) continue;
+        copyRoutingState(edges, candidateEdges);
+        changed = true;
+        break;
+      }
+    });
+
+  return changed;
 }
 
 function dynamicReciprocalPeerIds(edges: TransferFlowEdge[]) {
@@ -4640,11 +5389,17 @@ export async function layoutTrace(trace: TxTraceResponse) {
     }
     compactDynamicReciprocalColumnGaps(edges, positions, nodes);
   }
+  equalizeComponentColumnSpacing(
+    edges,
+    positions,
+    trace.tx.from.toLowerCase(),
+  );
   alignDisconnectedComponents(
     edges,
     positions,
     trace.tx.from.toLowerCase(),
   );
+  alignColumnPairLabels(edges, positions);
 
   return {
     nodes: nodes.map((node) => ({
