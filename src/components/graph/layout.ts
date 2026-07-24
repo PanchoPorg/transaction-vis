@@ -214,6 +214,7 @@ export function toFlowElements(trace: TxTraceResponse) {
         targetCurveMode: "default",
         sourcePortRatio: defaultPortRatio("out-right"),
         targetPortRatio: defaultPortRatio("in-left"),
+        mixedDirectionGroups: [],
         transfers: edge.transferIds
           .map((transferId) => transferById.get(transferId))
           .filter((transfer): transfer is NonNullable<typeof transfer> => Boolean(transfer)),
@@ -1249,10 +1250,22 @@ function routeModes(geometry: EdgeRouteGeometry) {
   return modes;
 }
 
+function shareMixedDirectionGroup(
+  a: TransferFlowEdge,
+  b: TransferFlowEdge,
+) {
+  const bGroups = new Set(b.data?.mixedDirectionGroups ?? []);
+  return (a.data?.mixedDirectionGroups ?? []).some((group) =>
+    bGroups.has(group)
+  );
+}
+
+type PathIntersectionMode = "none" | "ordered" | "all";
+
 function assignmentCompatible(
   candidate: RouteAssignment,
   other: RouteAssignment,
-  enforcePathIntersections = true,
+  pathIntersectionMode: PathIntersectionMode = "ordered",
 ) {
   const physicalOrder = routeOrderRelation(candidate.entry, other.entry);
   const intervalsOverlap = horizontalIntervalsOverlap(
@@ -1274,8 +1287,9 @@ function assignmentCompatible(
     return false;
   }
   if (
-    enforcePathIntersections &&
-    physicalOrder !== 0 &&
+    (pathIntersectionMode === "all" ||
+      (pathIntersectionMode === "ordered" && physicalOrder !== 0) ||
+      shareMixedDirectionGroup(candidate.entry.edge, other.entry.edge)) &&
     pathsIntersect(
       candidate.geometry.segments,
       other.geometry.segments,
@@ -1303,7 +1317,7 @@ function assignmentForRoute(
   targetCurveMode: EdgeCurveMode,
   positions: Map<string, { x: number; y: number }>,
   assignments: RouteAssignment[],
-  enforcePathIntersections = true,
+  pathIntersectionMode: PathIntersectionMode = "ordered",
 ) {
   const geometry = routeGeometryWithModes(
     entry,
@@ -1331,7 +1345,7 @@ function assignmentForRoute(
     targetCurveMode,
   } satisfies RouteAssignment;
   return assignments.every((other) =>
-    assignmentCompatible(assignment, other, enforcePathIntersections)
+    assignmentCompatible(assignment, other, pathIntersectionMode)
   )
     ? assignment
     : null;
@@ -1343,7 +1357,7 @@ function assignmentOptions(
   positions: Map<string, { x: number; y: number }>,
   assignments: RouteAssignment[],
   maxOptions = 32,
-  enforcePathIntersections = true,
+  pathIntersectionMode: PathIntersectionMode = "ordered",
 ) {
   const routeModesByCost = candidates
     .flatMap((routeY) => {
@@ -1394,13 +1408,316 @@ function assignmentOptions(
       targetCurveMode,
       positions,
       assignments,
-      enforcePathIntersections,
+      pathIntersectionMode,
     );
     if (!assignment) continue;
     options.push(assignment);
     if (options.length >= maxOptions) break;
   }
   return options;
+}
+
+type RouteEndpoint = "source" | "target";
+
+function mixedDirectionGroupNodeId(group: string) {
+  const separator = group.lastIndexOf(":");
+  return separator >= 0 ? group.slice(0, separator) : group;
+}
+
+function preferredMixedDirectionEndpoints(entry: RouteEntry) {
+  const endpoints = new Set<RouteEndpoint>();
+  (entry.edge.data?.mixedDirectionGroups ?? []).forEach((group) => {
+    const nodeId = mixedDirectionGroupNodeId(group);
+    if (entry.edge.source === nodeId) endpoints.add("target");
+    if (entry.edge.target === nodeId) endpoints.add("source");
+  });
+  return endpoints;
+}
+
+function mixedDirectionEntryComponents(entries: RouteEntry[]) {
+  const mixedEntries = entries.filter(
+    (entry) =>
+      (entry.edge.data?.mixedDirectionGroups?.length ?? 0) > 0,
+  );
+  const unseen = new Set(mixedEntries);
+  const components: RouteEntry[][] = [];
+
+  while (unseen.size > 0) {
+    const first = unseen.values().next().value as RouteEntry;
+    const component: RouteEntry[] = [];
+    const groups = new Set(
+      first.edge.data?.mixedDirectionGroups ?? [],
+    );
+    const queue = [first];
+    unseen.delete(first);
+
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const entry = queue[cursor];
+      component.push(entry);
+      (entry.edge.data?.mixedDirectionGroups ?? []).forEach((group) =>
+        groups.add(group)
+      );
+
+      let added = true;
+      while (added) {
+        added = false;
+        [...unseen].forEach((candidate) => {
+          if (
+            !(candidate.edge.data?.mixedDirectionGroups ?? []).some(
+              (group) => groups.has(group),
+            )
+          ) {
+            return;
+          }
+          unseen.delete(candidate);
+          queue.push(candidate);
+          (candidate.edge.data?.mixedDirectionGroups ?? []).forEach(
+            (group) => groups.add(group),
+          );
+          added = true;
+        });
+      }
+    }
+
+    components.push(component);
+  }
+
+  return components;
+}
+
+function mixedDirectionAssignmentOptions(
+  entry: RouteEntry,
+  candidates: number[],
+  positions: Map<string, { x: number; y: number }>,
+  assignments: RouteAssignment[],
+  allowTwoCurveRoutes: boolean,
+  optionLimit: number,
+) {
+  const preferredEndpoints = preferredMixedDirectionEndpoints(entry);
+  const preferredRouteYs: number[] = [];
+  if (preferredEndpoints.has("source")) {
+    preferredRouteYs.push(entry.sourcePoint.y);
+  }
+  if (preferredEndpoints.has("target")) {
+    preferredRouteYs.push(entry.targetPoint.y);
+  }
+  const routeYs = [
+    ...new Set([
+      ...preferredRouteYs,
+      entry.sourcePoint.y,
+      entry.targetPoint.y,
+      ...(allowTwoCurveRoutes
+        ? prioritizedRouteCandidates(entry, candidates, optionLimit * 8)
+        : []),
+    ]),
+  ];
+  const ranked = routeYs.flatMap((routeY) => {
+    const baseGeometry = routeGeometryWithModes(
+      entry,
+      routeY,
+      "default",
+      "default",
+    );
+    const curveCount =
+      Number(baseGeometry.sourceNeedsCurve) +
+      Number(baseGeometry.targetNeedsCurve);
+    if (curveCount > (allowTwoCurveRoutes ? 2 : 1)) return [];
+
+    const preferredCurveCount =
+      Number(
+        preferredEndpoints.has("source") &&
+          baseGeometry.sourceNeedsCurve,
+      ) +
+      Number(
+        preferredEndpoints.has("target") &&
+          baseGeometry.targetNeedsCurve,
+      );
+    return routeModes(baseGeometry).map(
+      ([sourceCurveMode, targetCurveMode]) => ({
+        routeY,
+        sourceCurveMode,
+        targetCurveMode,
+        curveCount,
+        preferredCurveCount,
+        compactCount:
+          Number(sourceCurveMode === "compact") +
+          Number(targetCurveMode === "compact"),
+      }),
+    );
+  }).sort(
+    (a, b) =>
+      a.preferredCurveCount - b.preferredCurveCount ||
+      a.curveCount - b.curveCount ||
+      a.compactCount - b.compactCount ||
+      Math.abs(a.routeY - entry.orderY) -
+        Math.abs(b.routeY - entry.orderY) ||
+      a.routeY - b.routeY,
+  );
+
+  const options: RouteAssignment[] = [];
+  for (const candidate of ranked) {
+    const assignment = assignmentForRoute(
+      entry,
+      candidate.routeY,
+      candidate.sourceCurveMode,
+      candidate.targetCurveMode,
+      positions,
+      assignments,
+      "all",
+    );
+    if (!assignment) continue;
+    options.push(assignment);
+    if (options.length >= optionLimit) break;
+  }
+  return options;
+}
+
+function findMixedDirectionAssignments(
+  entries: RouteEntry[],
+  positions: Map<string, { x: number; y: number }>,
+  candidates: number[],
+  fixedAssignments: RouteAssignment[],
+  maxTwoCurveRoutes: number,
+  optionLimit: number,
+): RouteAssignment[] | null {
+  type SearchState = {
+    assignments: RouteAssignment[];
+    twoCurveRoutes: number;
+    preferredCurveCount: number;
+    fullyStraightRoutes: number;
+    curvedEndpoints: number;
+    compactCount: number;
+    routeDisplacement: number;
+    labelDisplacement: number;
+    stableKey: string;
+  };
+  const orderedEntries = orderedRouteEntries(entries);
+  const beamWidth = Math.max(
+    32,
+    Math.min(128, optionLimit * 2),
+  );
+  let states: SearchState[] = [{
+    assignments: [],
+    twoCurveRoutes: 0,
+    preferredCurveCount: 0,
+    fullyStraightRoutes: 0,
+    curvedEndpoints: 0,
+    compactCount: 0,
+    routeDisplacement: 0,
+    labelDisplacement: 0,
+    stableKey: "",
+  }];
+
+  for (const entry of orderedEntries) {
+    const nextStates: SearchState[] = [];
+    for (const state of states) {
+      const options = mixedDirectionAssignmentOptions(
+        entry,
+        candidates,
+        positions,
+        [...fixedAssignments, ...state.assignments],
+        maxTwoCurveRoutes > state.twoCurveRoutes,
+        optionLimit,
+      );
+      const preferredEndpoints =
+        preferredMixedDirectionEndpoints(entry);
+
+      for (const assignment of options) {
+        const curveCount = assignmentCurveCount(assignment);
+        const twoCurveRoutes =
+          state.twoCurveRoutes + Number(curveCount === 2);
+        if (twoCurveRoutes > maxTwoCurveRoutes) continue;
+        const preferredCurveCount =
+          Number(
+            preferredEndpoints.has("source") &&
+              assignment.geometry.sourceNeedsCurve,
+          ) +
+          Number(
+            preferredEndpoints.has("target") &&
+              assignment.geometry.targetNeedsCurve,
+          );
+        const compactCount =
+          Number(assignment.sourceCurveMode === "compact") +
+          Number(assignment.targetCurveMode === "compact");
+        nextStates.push({
+          assignments: [...state.assignments, assignment],
+          twoCurveRoutes,
+          preferredCurveCount:
+            state.preferredCurveCount + preferredCurveCount,
+          fullyStraightRoutes:
+            state.fullyStraightRoutes + Number(curveCount === 0),
+          curvedEndpoints: state.curvedEndpoints + curveCount,
+          compactCount: state.compactCount + compactCount,
+          routeDisplacement:
+            state.routeDisplacement +
+            Math.abs(assignment.routeY - entry.orderY),
+          labelDisplacement:
+            state.labelDisplacement +
+            Math.abs(
+              assignment.labelBias - entry.preferredLabelBias,
+            ),
+          stableKey:
+            `${state.stableKey}|${entry.edge.id}:` +
+            `${assignment.routeY}:` +
+            `${assignment.sourceCurveMode}:` +
+            assignment.targetCurveMode,
+        });
+      }
+    }
+    if (nextStates.length === 0) return null;
+
+    nextStates.sort(
+      (a, b) =>
+        a.twoCurveRoutes - b.twoCurveRoutes ||
+        a.preferredCurveCount - b.preferredCurveCount ||
+        b.fullyStraightRoutes - a.fullyStraightRoutes ||
+        a.curvedEndpoints - b.curvedEndpoints ||
+        a.compactCount - b.compactCount ||
+        a.routeDisplacement - b.routeDisplacement ||
+        a.labelDisplacement - b.labelDisplacement ||
+        a.stableKey.localeCompare(b.stableKey),
+    );
+    states = nextStates.slice(0, beamWidth);
+  }
+
+  return states[0]?.assignments ?? null;
+}
+
+function optimizeMixedDirectionAssignments(
+  component: RouteEntry[],
+  positions: Map<string, { x: number; y: number }>,
+  assignments: RouteAssignment[],
+  candidates: number[],
+  expansion: number,
+) {
+  for (const mixedComponent of mixedDirectionEntryComponents(component)) {
+    const mixedEntries = new Set(mixedComponent);
+    const fixedAssignments = assignments.filter(
+      (assignment) => !mixedEntries.has(assignment.entry),
+    );
+    const optionLimit = Math.max(
+      8,
+      Math.ceil(Math.sqrt(expansion)) * 2,
+    );
+    const optimized = findMixedDirectionAssignments(
+      mixedComponent,
+      positions,
+      candidates,
+      fixedAssignments,
+      mixedComponent.length,
+      optionLimit,
+    );
+    if (!optimized) return false;
+
+    assignments.splice(
+      0,
+      assignments.length,
+      ...fixedAssignments,
+      ...optimized,
+    );
+  }
+
+  return true;
 }
 
 function minimumStandaloneCurveCount(
@@ -1825,6 +2142,11 @@ function assignComponentLanes(
   positions: Map<string, { x: number; y: number }>,
 ) {
   let expansion = component.length + positions.size + 1;
+  const pathIntersectionMode: PathIntersectionMode = "ordered";
+  const hasMixedDirectionConstraints = component.some(
+    (entry) =>
+      (entry.edge.data?.mixedDirectionGroups?.length ?? 0) > 0,
+  );
 
   while (true) {
     const candidates = routeCandidates(component, expansion, positions);
@@ -1858,6 +2180,7 @@ function assignComponentLanes(
         positions,
         assignments,
         1,
+        pathIntersectionMode,
       )[0];
       if (!assignment) {
         failed = true;
@@ -1870,7 +2193,7 @@ function assignComponentLanes(
       assignments.length = 0;
       const assignRemaining = (
         remaining: RouteEntry[],
-        enforcePathIntersections: boolean,
+        remainingPathIntersectionMode: PathIntersectionMode,
       ): boolean => {
         if (remaining.length === 0) return true;
         const choices = remaining
@@ -1883,7 +2206,7 @@ function assignComponentLanes(
               positions,
               assignments,
               4,
-              enforcePathIntersections,
+              remainingPathIntersectionMode,
             ),
           }))
           .sort(
@@ -1899,7 +2222,10 @@ function assignComponentLanes(
         for (const assignment of choice.options) {
           assignments.push(assignment);
           if (
-            assignRemaining(nextRemaining, enforcePathIntersections)
+            assignRemaining(
+              nextRemaining,
+              remainingPathIntersectionMode,
+            )
           ) {
             return true;
           }
@@ -1907,7 +2233,12 @@ function assignComponentLanes(
         }
         return false;
       };
-      failed = !assignRemaining(entries, true);
+      if (!hasMixedDirectionConstraints) {
+        failed = !assignRemaining(
+          entries,
+          pathIntersectionMode,
+        );
+      }
       if (failed) {
         assignments.length = 0;
         failed = false;
@@ -1918,7 +2249,7 @@ function assignComponentLanes(
             positions,
             assignments,
             1,
-            false,
+            "none",
           )[0];
           if (!assignment) {
             failed = true;
@@ -1937,7 +2268,7 @@ function assignComponentLanes(
             positions,
             assignments,
             1,
-            false,
+            "none",
           )[0];
           if (!assignment) {
             failed = true;
@@ -1948,11 +2279,24 @@ function assignComponentLanes(
       }
       if (failed) {
         assignments.length = 0;
-        failed = !assignRemaining(entries, false);
+        failed = !assignRemaining(entries, "none");
       }
     }
 
     if (failed) {
+      expansion *= 2;
+      continue;
+    }
+
+    if (
+      !optimizeMixedDirectionAssignments(
+        component,
+        positions,
+        assignments,
+        candidates,
+        expansion,
+      )
+    ) {
       expansion *= 2;
       continue;
     }
@@ -2120,8 +2464,75 @@ function dynamicPortId(
   nodeId: string,
   type: "source" | "target",
   side: GraphPortSide,
+  purpose: "reciprocal" | "mixed" = "reciprocal",
 ) {
-  return `dynamic:${type}:${nodeId}:${edge.id}:${side}`;
+  const purposePrefix = purpose === "mixed" ? "mixed:" : "";
+  return `dynamic:${purposePrefix}${type}:${nodeId}:${edge.id}:${side}`;
+}
+
+function assignOrderedSidePorts(
+  nodes: AddressFlowNode[],
+  edges: TransferFlowEdge[],
+  positions: Map<string, { x: number; y: number }>,
+  affectedSides: Set<string>,
+  purpose: "reciprocal" | "mixed" = "reciprocal",
+) {
+  let changed = false;
+
+  [...affectedSides].sort().forEach((key) => {
+    const separator = key.lastIndexOf(":");
+    const nodeId = key.slice(0, separator);
+    const side = key.slice(separator + 1) as GraphPortSide;
+    const node = nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) return;
+    const sideEdges = edges.filter(
+      (edge) =>
+        (edge.source === nodeId || edge.target === nodeId) &&
+        edgeSideAtNode(edge, nodeId, positions) === side,
+    );
+    const ordered = orderedSideEdges(sideEdges, nodeId, positions);
+    if (ordered.length === 0) return;
+    const dynamicPorts: GraphPortSpec[] = ordered.map((edge, index) => {
+      const type = edge.source === nodeId ? "source" : "target";
+      const ratio =
+        ordered.length === 1
+          ? (UPPER_PORT_RATIO + LOWER_PORT_RATIO) / 2
+          : UPPER_PORT_RATIO +
+            ((LOWER_PORT_RATIO - UPPER_PORT_RATIO) * index) /
+              (ordered.length - 1);
+      const id = dynamicPortId(
+        edge,
+        nodeId,
+        type,
+        side,
+        purpose,
+      );
+      if (type === "source") {
+        edge.sourceHandle = id;
+        edge.data = {
+          ...edge.data!,
+          sourcePortRatio: ratio,
+        };
+      } else {
+        edge.targetHandle = id;
+        edge.data = {
+          ...edge.data!,
+          targetPortRatio: ratio,
+        };
+      }
+      return { id, type, side, ratio };
+    });
+    node.data = {
+      ...node.data,
+      ports: [
+        ...node.data.ports.filter((port) => port.side !== side),
+        ...dynamicPorts,
+      ],
+    };
+    changed = true;
+  });
+
+  return changed;
 }
 
 export function assignReciprocalBundlePorts(
@@ -2192,53 +2603,7 @@ export function assignReciprocalBundlePorts(
     });
   });
 
-  affectedSides.forEach((key) => {
-    const separator = key.lastIndexOf(":");
-    const nodeId = key.slice(0, separator);
-    const side = key.slice(separator + 1) as GraphPortSide;
-    const node = nodes.find((candidate) => candidate.id === nodeId);
-    if (!node) return;
-    const sideEdges = edges.filter(
-      (edge) =>
-        (edge.source === nodeId || edge.target === nodeId) &&
-        edgeSideAtNode(edge, nodeId, positions) === side,
-    );
-    const ordered = orderedSideEdges(sideEdges, nodeId, positions);
-    if (ordered.length === 0) return;
-    const dynamicPorts: GraphPortSpec[] = ordered.map((edge, index) => {
-      const type = edge.source === nodeId ? "source" : "target";
-      const ratio =
-        ordered.length === 1
-          ? (UPPER_PORT_RATIO + LOWER_PORT_RATIO) / 2
-          : UPPER_PORT_RATIO +
-            ((LOWER_PORT_RATIO - UPPER_PORT_RATIO) * index) /
-              (ordered.length - 1);
-      const id = dynamicPortId(edge, nodeId, type, side);
-      if (type === "source") {
-        edge.sourceHandle = id;
-        edge.data = {
-          ...edge.data!,
-          sourcePortRatio: ratio,
-        };
-      } else {
-        edge.targetHandle = id;
-        edge.data = {
-          ...edge.data!,
-          targetPortRatio: ratio,
-        };
-      }
-      return { id, type, side, ratio };
-    });
-    node.data = {
-      ...node.data,
-      ports: [
-        ...node.data.ports.filter((port) => port.side !== side),
-        ...dynamicPorts,
-      ],
-    };
-  });
-
-  return true;
+  return assignOrderedSidePorts(nodes, edges, positions, affectedSides);
 }
 
 function edgePortPointAtNode(
@@ -2264,6 +2629,157 @@ function edgePortPointAtNode(
     );
   }
   return null;
+}
+
+function edgeHandleAtNode(edge: TransferFlowEdge, nodeId: string) {
+  if (edge.source === nodeId) return edge.sourceHandle;
+  if (edge.target === nodeId) return edge.targetHandle;
+  return null;
+}
+
+function edgeNeedsCurveAtNode(
+  edge: TransferFlowEdge,
+  nodeId: string,
+  geometry: EdgeRouteGeometry,
+) {
+  return edge.source === nodeId
+    ? geometry.sourceNeedsCurve
+    : geometry.targetNeedsCurve;
+}
+
+export function assignMixedDirectionFanoutPorts(
+  nodes: AddressFlowNode[],
+  edges: TransferFlowEdge[],
+  positions: Map<string, { x: number; y: number }>,
+) {
+  const geometries = new Map(
+    edges.map((edge) => [edge, edgeHorizontalRoute(edge, positions)]),
+  );
+  const edgesBySide = new Map<string, TransferFlowEdge[]>();
+  edges.forEach((edge) => {
+    [edge.source, edge.target].forEach((nodeId) => {
+      const side = edgeSideAtNode(edge, nodeId, positions);
+      const key = `${nodeId}:${side}`;
+      const group = edgesBySide.get(key) ?? [];
+      group.push(edge);
+      edgesBySide.set(key, group);
+    });
+  });
+
+  const affectedSides = new Set<string>();
+  [...edgesBySide.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .forEach(([key, sideEdges]) => {
+      if (
+        sideEdges.length < 2 ||
+        sideEdges.length > MAX_DYNAMIC_RECIPROCAL_DEGREE
+      ) {
+        return;
+      }
+      const separator = key.lastIndexOf(":");
+      const nodeId = key.slice(0, separator);
+      if (
+        sideEdges.some((edge) =>
+          edgeHandleAtNode(edge, nodeId)?.startsWith("dynamic:")
+        )
+      ) {
+        return;
+      }
+      const ordered = orderedSideEdges(sideEdges, nodeId, positions);
+      const crossingCounts = new Map<TransferFlowEdge, number>();
+
+      ordered.forEach((upper, upperIndex) => {
+        const upperPoint = edgePortPointAtNode(upper, nodeId, positions);
+        const upperGeometry = geometries.get(upper);
+        if (!upperPoint || !upperGeometry) return;
+
+        ordered.slice(upperIndex + 1).forEach((lower) => {
+          const lowerPoint = edgePortPointAtNode(lower, nodeId, positions);
+          const lowerGeometry = geometries.get(lower);
+          if (!lowerPoint || !lowerGeometry) return;
+          const samePhysicalHandle =
+            edgeHandleAtNode(upper, nodeId) ===
+            edgeHandleAtNode(lower, nodeId);
+          const localOrderIsInverted =
+            upperPoint.y > lowerPoint.y + ROUTE_EPSILON ||
+            (Math.abs(upperPoint.y - lowerPoint.y) <= ROUTE_EPSILON &&
+              !samePhysicalHandle);
+          if (
+            !localOrderIsInverted ||
+            !pathsIntersect(
+              upperGeometry.segments,
+              lowerGeometry.segments,
+              sharedPhysicalPorts(
+                upper,
+                lower,
+                upperGeometry,
+                lowerGeometry,
+              ),
+            )
+          ) {
+            return;
+          }
+          crossingCounts.set(
+            upper,
+            (crossingCounts.get(upper) ?? 0) + 1,
+          );
+          crossingCounts.set(
+            lower,
+            (crossingCounts.get(lower) ?? 0) + 1,
+          );
+        });
+      });
+
+      const anchor = [...crossingCounts.entries()]
+        .filter(([edge, crossingCount]) => {
+          const geometry = geometries.get(edge);
+          return (
+            crossingCount >= 2 &&
+            geometry &&
+            !edgeNeedsCurveAtNode(edge, nodeId, geometry)
+          );
+        })
+        .map(([edge]) => edge)
+        .sort(
+          (a, b) =>
+            Math.abs(
+              (a.data?.routeY ?? 0) -
+                nodeCenter(positions, nodeId).y,
+            ) -
+              Math.abs(
+                (b.data?.routeY ?? 0) -
+                  nodeCenter(positions, nodeId).y,
+              ) ||
+            edgeDisplayOrder(a) - edgeDisplayOrder(b) ||
+            a.id.localeCompare(b.id),
+        )[0];
+      if (anchor) {
+        affectedSides.add(key);
+      }
+    });
+
+  affectedSides.forEach((key) => {
+    (edgesBySide.get(key) ?? []).forEach((edge) => {
+      if (!edge.data) return;
+      edge.data = {
+        ...edge.data,
+        mixedDirectionGroups: [
+          ...new Set([
+            ...(edge.data.mixedDirectionGroups ?? []),
+            key,
+          ]),
+        ].sort(),
+      };
+    });
+  });
+
+  return assignOrderedSidePorts(
+    nodes,
+    edges,
+    positions,
+    affectedSides,
+    "mixed",
+  );
 }
 
 function edgePortRatioAtNode(edge: TransferFlowEdge, nodeId: string) {
@@ -2805,16 +3321,38 @@ function dynamicReciprocalPeerIds(edges: TransferFlowEdge[]) {
 
   const peerIds = new Set<string>();
   edges.forEach((edge) => {
+    const sourceIsMixed =
+      edge.sourceHandle?.startsWith("dynamic:mixed:") ?? false;
+    const targetIsMixed =
+      edge.targetHandle?.startsWith("dynamic:mixed:") ?? false;
+    const usesMixedDirectionPorts = sourceIsMixed || targetIsMixed;
+    if (!usesMixedDirectionPorts) {
+      if (
+        edge.sourceHandle?.startsWith("dynamic:") ||
+        edge.targetHandle?.startsWith("dynamic:")
+      ) {
+        if ((degrees.get(edge.source) ?? 0) <= 2) {
+          peerIds.add(edge.source);
+        }
+        if ((degrees.get(edge.target) ?? 0) <= 2) {
+          peerIds.add(edge.target);
+        }
+      }
+      return;
+    }
     if (
-      edge.sourceHandle?.startsWith("dynamic:") ||
-      edge.targetHandle?.startsWith("dynamic:")
+      edge.sourceHandle?.startsWith("dynamic:") &&
+      !sourceIsMixed &&
+      (degrees.get(edge.source) ?? 0) <= 2
     ) {
-      if ((degrees.get(edge.source) ?? 0) <= 2) {
-        peerIds.add(edge.source);
-      }
-      if ((degrees.get(edge.target) ?? 0) <= 2) {
-        peerIds.add(edge.target);
-      }
+      peerIds.add(edge.source);
+    }
+    if (
+      edge.targetHandle?.startsWith("dynamic:") &&
+      !targetIsMixed &&
+      (degrees.get(edge.target) ?? 0) <= 2
+    ) {
+      peerIds.add(edge.target);
     }
   });
   return peerIds;
@@ -4080,8 +4618,23 @@ export async function layoutTrace(trace: TxTraceResponse) {
   alignColumnsForStraightRoutes(edges, positions, receiverId);
   assignEdgePorts(edges, positions);
   assignRouteLanes(edges, positions);
-  if (assignReciprocalBundlePorts(nodes, edges, positions)) {
+  const hasDynamicReciprocalPorts = assignReciprocalBundlePorts(
+    nodes,
+    edges,
+    positions,
+  );
+  if (hasDynamicReciprocalPorts) {
     assignRouteLanes(edges, positions);
+  }
+  const hasMixedDirectionPorts = assignMixedDirectionFanoutPorts(
+    nodes,
+    edges,
+    positions,
+  );
+  if (hasMixedDirectionPorts) {
+    assignRouteLanes(edges, positions);
+  }
+  if (hasDynamicReciprocalPorts) {
     if (alignDynamicReciprocalLeafColumns(edges, positions)) {
       assignRouteLanes(edges, positions);
     }

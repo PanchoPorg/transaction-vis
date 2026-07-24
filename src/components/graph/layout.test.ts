@@ -9,6 +9,7 @@ import {
   adaptiveColumnClearGap,
   alignDisconnectedComponents,
   alignDynamicReciprocalLeafColumns,
+  assignMixedDirectionFanoutPorts,
   assignReciprocalBundlePorts,
   assignRouteLanes,
   alignColumnsForStraightRoutes,
@@ -226,6 +227,7 @@ function flowEdge(
       targetCurveMode: "default",
       sourcePortRatio: defaultPortRatio(sourceHandle),
       targetPortRatio: defaultPortRatio(targetHandle),
+      mixedDirectionGroups: [],
     },
   };
 }
@@ -357,6 +359,97 @@ function optimizedRoutingTopology() {
     "[9] 3,587.96 USDC";
 
   return { positions, edges };
+}
+
+function mixedDirectionFanoutTopology() {
+  const hub = "mixed-hub";
+  const transfer5Peer = "mixed-transfer-5-peer";
+  const transfer7Peer = "mixed-transfer-7-peer";
+  const transfer13Peer = "mixed-transfer-13-peer";
+  const transfer8Peer = "mixed-transfer-8-peer";
+  const positions = new Map<string, { x: number; y: number }>([
+    [hub, { x: 720, y: 679 }],
+    [transfer5Peer, { x: 1428, y: 244 }],
+    [transfer7Peer, { x: 1428, y: 341 }],
+    [transfer13Peer, { x: 1428, y: 573 }],
+    [transfer8Peer, { x: 1428, y: 805 }],
+  ]);
+  const edges = [
+    flowEdge(
+      "mixed-transfer-5",
+      transfer5Peer,
+      hub,
+      "out-left",
+      "in-right",
+      [5],
+    ),
+    flowEdge(
+      "mixed-transfer-7",
+      hub,
+      transfer7Peer,
+      "out-right",
+      "in-left",
+      [7],
+    ),
+    flowEdge(
+      "mixed-transfer-13",
+      hub,
+      transfer13Peer,
+      "out-right",
+      "in-left",
+      [13],
+    ),
+    flowEdge(
+      "mixed-transfer-8",
+      transfer8Peer,
+      hub,
+      "out-left",
+      "in-right",
+      [8],
+    ),
+  ];
+  const nodes = [...positions.entries()].map(([id, position]) =>
+    flowNode(id, position),
+  );
+
+  return { hub, positions, nodes, edges };
+}
+
+function mixedDirectionFanoutRangeTopology(edgeCount: number) {
+  const hub = `mixed-range-hub-${edgeCount}`;
+  const positions = new Map<string, { x: number; y: number }>([
+    [hub, { x: 720, y: 679 }],
+  ]);
+  const peerYs = [244, 341, 573];
+  const edges = Array.from({ length: edgeCount }, (_, index) => {
+    const peer = `mixed-range-peer-${edgeCount}-${index}`;
+    positions.set(peer, {
+      x: 1428,
+      y: peerYs[index] ?? 805 + (index - 3) * 97,
+    });
+    return index === 0
+      ? flowEdge(
+          `mixed-range-${edgeCount}-${index}`,
+          peer,
+          hub,
+          "out-left",
+          "in-right",
+          [5],
+        )
+      : flowEdge(
+          `mixed-range-${edgeCount}-${index}`,
+          hub,
+          peer,
+          "out-right",
+          "in-left",
+          [6 + index],
+        );
+  });
+  const nodes = [...positions.entries()].map(([id, position]) =>
+    flowNode(id, position),
+  );
+
+  return { positions, nodes, edges };
 }
 
 function admissibleFallbackRoutingTopology() {
@@ -1243,7 +1336,13 @@ describe("graph layout", () => {
 
   it("satisfies all reported transaction routing invariants", () => {
     const { positions, edges } = reportedTopology();
+    const nodes = [...positions.entries()].map(([id, position]) =>
+      flowNode(id, position),
+    );
     assignRouteLanes(edges, positions);
+    if (assignMixedDirectionFanoutPorts(nodes, edges, positions)) {
+      assignRouteLanes(edges, positions);
+    }
     const byId = new Map(edges.map((edge) => [edge.id, edge]));
     const initialCall = byId.get("initial-call")!;
     const unknownNative = byId.get("unknown-native")!;
@@ -1290,8 +1389,15 @@ describe("graph layout", () => {
     const reverse = reportedTopology();
     reverse.edges.reverse();
 
-    assignRouteLanes(forward.edges, forward.positions);
-    assignRouteLanes(reverse.edges, reverse.positions);
+    [forward, reverse].forEach(({ edges, positions }) => {
+      const nodes = [...positions.entries()].map(([id, position]) =>
+        flowNode(id, position),
+      );
+      assignRouteLanes(edges, positions);
+      if (assignMixedDirectionFanoutPorts(nodes, edges, positions)) {
+        assignRouteLanes(edges, positions);
+      }
+    });
 
     const forwardRoutes = new Map(forward.edges.map((edge) => [edge.id, routeY(edge)]));
     reverse.edges.forEach((edge) => {
@@ -1299,9 +1405,184 @@ describe("graph layout", () => {
     });
   });
 
+  it("repairs mixed fan-in/fan-out inversions while keeping one straight endpoint per edge", () => {
+    const forward = mixedDirectionFanoutTopology();
+    const reverse = mixedDirectionFanoutTopology();
+    reverse.edges.reverse();
+
+    [forward, reverse].forEach(({ nodes, edges, positions }) => {
+      assignRouteLanes(edges, positions);
+      const byId = new Map(edges.map((edge) => [edge.id, edge]));
+      const transfer5 = byId.get("mixed-transfer-5")!;
+      const transfer7 = byId.get("mixed-transfer-7")!;
+      const before5 = edgeHorizontalRoute(transfer5, positions)!;
+      const before7 = edgeHorizontalRoute(transfer7, positions)!;
+      expect(
+        pathsIntersect(before5.segments, before7.segments),
+      ).toBe(true);
+
+      expect(
+        assignMixedDirectionFanoutPorts(nodes, edges, positions),
+      ).toBe(true);
+      assignRouteLanes(edges, positions);
+    });
+
+    const byId = new Map(
+      forward.edges.map((edge) => [edge.id, edge]),
+    );
+    const transfer5 = byId.get("mixed-transfer-5")!;
+    const transfer7 = byId.get("mixed-transfer-7")!;
+    const transfer13 = byId.get("mixed-transfer-13")!;
+    const transfer8 = byId.get("mixed-transfer-8")!;
+    const transfer5Route = edgeHorizontalRoute(
+      transfer5,
+      forward.positions,
+    )!;
+    const transfer7Route = edgeHorizontalRoute(
+      transfer7,
+      forward.positions,
+    )!;
+    const transfer13Route = edgeHorizontalRoute(
+      transfer13,
+      forward.positions,
+    )!;
+    const transfer8Route = edgeHorizontalRoute(
+      transfer8,
+      forward.positions,
+    )!;
+
+    expect(transfer5Route.sourceNeedsCurve).toBe(false);
+    expect(transfer5Route.targetNeedsCurve).toBe(true);
+    expect(transfer5.data?.targetCurveMode).toBe("compact");
+    expect(transfer7Route.sourceNeedsCurve).toBe(true);
+    expect(transfer7Route.targetNeedsCurve).toBe(false);
+    expect(transfer13Route.sourceNeedsCurve).toBe(true);
+    expect(transfer13Route.targetNeedsCurve).toBe(false);
+    expect(transfer8Route.sourceNeedsCurve).toBe(false);
+    expect(transfer8Route.targetNeedsCurve).toBe(true);
+    expect(routeY(transfer5)).toBeLessThan(routeY(transfer7));
+    expect(routeY(transfer7)).toBeLessThan(routeY(transfer13));
+    forward.edges.forEach((edge) => {
+      const geometry = edgeHorizontalRoute(edge, forward.positions)!;
+      expect(
+        Number(geometry.sourceNeedsCurve) +
+          Number(geometry.targetNeedsCurve),
+        `${edge.id} lost both straight endpoints`,
+      ).toBeLessThanOrEqual(1);
+    });
+
+    const orderedHubRatios = [
+      transfer5.data!.targetPortRatio,
+      transfer7.data!.sourcePortRatio,
+      transfer13.data!.sourcePortRatio,
+      transfer8.data!.targetPortRatio,
+    ];
+    expect(orderedHubRatios).toEqual(
+      [...orderedHubRatios].sort((a, b) => a - b),
+    );
+    const hubNode = forward.nodes.find(
+      (node) => node.id === forward.hub,
+    )!;
+    forward.edges.forEach((edge) => {
+      const sourceAtHub = edge.source === forward.hub;
+      const handle = sourceAtHub
+        ? edge.sourceHandle
+        : edge.targetHandle;
+      const ratio = sourceAtHub
+        ? edge.data!.sourcePortRatio
+        : edge.data!.targetPortRatio;
+      expect(
+        hubNode.data.ports.find((port) => port.id === handle)?.ratio,
+      ).toBe(ratio);
+    });
+
+    forward.edges.forEach((edge, index) => {
+      const geometry = edgeHorizontalRoute(edge, forward.positions)!;
+      forward.edges.slice(index + 1).forEach((other) => {
+        const otherGeometry = edgeHorizontalRoute(
+          other,
+          forward.positions,
+        )!;
+        expect(
+          pathsIntersect(geometry.segments, otherGeometry.segments),
+          `${edge.id} crosses ${other.id}`,
+        ).toBe(false);
+      });
+    });
+
+    const reverseById = new Map(
+      reverse.edges.map((edge) => [edge.id, edge]),
+    );
+    forward.edges.forEach((edge) => {
+      const reversed = reverseById.get(edge.id)!;
+      expect(reversed.data?.routeY).toBe(edge.data?.routeY);
+      expect(reversed.sourceHandle).toBe(edge.sourceHandle);
+      expect(reversed.targetHandle).toBe(edge.targetHandle);
+      expect(reversed.data?.sourcePortRatio).toBe(
+        edge.data?.sourcePortRatio,
+      );
+      expect(reversed.data?.targetPortRatio).toBe(
+        edge.data?.targetPortRatio,
+      );
+      expect(reversed.data?.sourceCurveMode).toBe(
+        edge.data?.sourceCurveMode,
+      );
+      expect(reversed.data?.targetCurveMode).toBe(
+        edge.data?.targetCurveMode,
+      );
+    });
+  });
+
+  it.each(Array.from({ length: 10 }, (_, index) => index + 3))(
+    "keeps one straight endpoint across a mixed side with %i routes",
+    (edgeCount) => {
+      const topology = mixedDirectionFanoutRangeTopology(edgeCount);
+      assignRouteLanes(topology.edges, topology.positions);
+      expect(
+        assignMixedDirectionFanoutPorts(
+          topology.nodes,
+          topology.edges,
+          topology.positions,
+        ),
+      ).toBe(true);
+      assignRouteLanes(topology.edges, topology.positions);
+
+      topology.edges.forEach((edge, index) => {
+        const geometry = edgeHorizontalRoute(
+          edge,
+          topology.positions,
+        )!;
+        expect(
+          Number(geometry.sourceNeedsCurve) +
+            Number(geometry.targetNeedsCurve),
+          `${edge.id} lost both straight endpoints`,
+        ).toBeLessThanOrEqual(1);
+        topology.edges.slice(index + 1).forEach((other) => {
+          const otherGeometry = edgeHorizontalRoute(
+            other,
+            topology.positions,
+          )!;
+          expect(
+            pathsIntersect(
+              geometry.segments,
+              otherGeometry.segments,
+            ),
+            `${edge.id} crosses ${other.id}`,
+          ).toBe(false);
+        });
+      });
+    },
+  );
+
   it("optimizes direct routes, pairwise lanes, compact curves, and label slots together", () => {
     const { positions, edges } = optimizedRoutingTopology();
+    const nodes = [...positions.entries()].map(([id, position]) =>
+      flowNode(id, position),
+    );
     assignRouteLanes(edges, positions);
+    if (assignMixedDirectionFanoutPorts(nodes, edges, positions)) {
+      assignRouteLanes(edges, positions);
+    }
     const byId = new Map(edges.map((edge) => [edge.id, edge]));
     const transfer6 = byId.get("transfer-6")!;
     const transfer9 = byId.get("transfer-9")!;
@@ -2260,6 +2541,9 @@ describe("graph layout", () => {
 
     expect(
       assignReciprocalBundlePorts(nodes, edges, positions),
+    ).toBe(false);
+    expect(
+      assignMixedDirectionFanoutPorts(nodes, edges, positions),
     ).toBe(false);
     nodes.forEach((node) => {
       expect(
